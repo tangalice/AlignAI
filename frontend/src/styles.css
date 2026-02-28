@@ -461,6 +461,95 @@ body {
   font-size: 0.9rem;
 }
 
+.preprocess-section {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.preprocess-desc {
+  margin: 0 0 12px;
+  font-size: 0.9rem;
+  opacity: 0.85;
+  line-height: 1.4;
+}
+
+.preprocess-actions {
+  margin-bottom: 12px;
+}
+
+.preprocess-btn {
+  padding: 10px 18px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: #0a0a12;
+  background: #3fb0ff;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.preprocess-btn:hover:not(:disabled) {
+  background: #5fc0ff;
+}
+
+.preprocess-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.preprocess-error {
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 0.9rem;
+  color: #ffb3b8;
+  background: rgba(255, 71, 87, 0.12);
+  border: 1px solid rgba(255, 99, 132, 0.3);
+  border-radius: 10px;
+}
+
+.preprocess-output {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.preprocess-textarea {
+  width: 100%;
+  min-height: 200px;
+  padding: 12px;
+  font-family: ui-monospace, "SF Mono", Monaco, monospace;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: #e0e0e0;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  resize: vertical;
+  outline: none;
+}
+
+.preprocess-textarea:focus {
+  border-color: rgba(63, 176, 255, 0.4);
+}
+
+.copy-btn {
+  align-self: flex-start;
+  padding: 8px 14px;
+  font-size: 0.9rem;
+  color: #0a0a12;
+  background: rgba(63, 176, 255, 0.9);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.copy-btn:hover {
+  background: #3fb0ff;
+}
+
 @media (min-width: 900px) {
   .header h1 {
     font-size: 2.4rem;
