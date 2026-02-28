@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { PoseLandmarker, FilesetResolver, DrawingUtils } from "@mediapipe/tasks-vision";
+import { comparePoseWithCoaching } from "./comparePose";
 
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
@@ -35,6 +36,7 @@ function App() {
   const [preprocessResult, setPreprocessResult] = useState(null);
   const [preprocessError, setPreprocessError] = useState(null);
   const [copyFeedback, setCopyFeedback] = useState(false);
+  const [coachingFeedback, setCoachingFeedback] = useState(null);
 
   // Tabs: "youtube" | "ai"
   const [activeTab, setActiveTab] = useState("youtube");
@@ -409,6 +411,23 @@ function App() {
     };
   }, []);
 
+  const referenceFramesRef = useRef(null);
+
+  useEffect(() => {
+    if (!preprocessResult) {
+      referenceFramesRef.current = null;
+      return;
+    }
+    try {
+      const parsed = JSON.parse(preprocessResult);
+      referenceFramesRef.current = parsed?.frames ?? null;
+    } catch {
+      referenceFramesRef.current = null;
+    }
+  }, [preprocessResult]);
+
+  const lastCompareMsRef = useRef(-Infinity);
+
   useEffect(() => {
     if (!isStreaming || !isModelReady) return;
 
@@ -452,6 +471,39 @@ function App() {
             lineWidth: 2,
           });
         }
+
+        const liveLandmarks = result.landmarks[0].map((lm) => [lm.x, lm.y, lm.z]);
+        const now = performance.now();
+        if (now - lastCompareMsRef.current >= 1000 / 8) {
+          lastCompareMsRef.current = now;
+          const refs = referenceFramesRef.current;
+          const ytVideo = ytVideoRef.current;
+          if (
+            activeTab === "youtube" &&
+            refs?.length &&
+            ytVideo &&
+            Number.isFinite(ytVideo.currentTime)
+          ) {
+            const videoT = ytVideo.currentTime;
+            const closest = refs.reduce((a, b) =>
+              Math.abs(a.t - videoT) <= Math.abs(b.t - videoT) ? a : b
+            );
+            if (closest?.landmarks?.length) {
+              const { score, limbScores, feedback } = comparePoseWithCoaching(
+                { landmarks: closest.landmarks },
+                { landmarks: liveLandmarks }
+              );
+              setCoachingFeedback(feedback);
+              fetch(`${apiBase}/api/compare-pose`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ video_t: videoT, score, limbScores, feedback }),
+              }).catch(() => {});
+            } else {
+              setCoachingFeedback(null);
+            }
+          }
+        }
       }
 
       ctx.restore();
@@ -461,11 +513,13 @@ function App() {
     animationFrameId = requestAnimationFrame(renderLoop);
 
     return () => {
-      if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-      }
+      if (animationFrameId) cancelAnimationFrame(animationFrameId);
     };
-  }, [isStreaming, isModelReady]);
+  }, [isStreaming, isModelReady, activeTab, apiBase]);
+
+  useEffect(() => {
+    if (activeTab !== "youtube") setCoachingFeedback(null);
+  }, [activeTab]);
 
   const leftPanelTitle = activeTab === "youtube" ? "YouTube Video" : "AI Generated Video";
 
@@ -738,6 +792,9 @@ function App() {
             <video ref={videoRef} autoPlay playsInline muted className="video hidden-video" aria-hidden="true" />
             <canvas ref={outputCanvasRef} className="video" />
           </div>
+          {coachingFeedback && (
+            <div className="coaching-feedback">{coachingFeedback.message}</div>
+          )}
         </section>
       </main>
 

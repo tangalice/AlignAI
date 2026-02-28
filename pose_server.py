@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import tempfile
 
 # Fix SSL certs on macOS (python.org installs)
@@ -55,6 +56,24 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+def _extract_youtube_video_id(url: str) -> Optional[str]:
+    """Extract video ID from various YouTube URL formats."""
+    if not url or not isinstance(url, str):
+        return None
+    url = url.strip()
+    patterns = [
+        r"(?:youtube\.com/watch\?v=)([a-zA-Z0-9_-]{11})",
+        r"(?:youtu\.be/)([a-zA-Z0-9_-]{11})",
+        r"(?:youtube\.com/shorts/)([a-zA-Z0-9_-]{11})",
+        r"(?:youtube\.com/embed/)([a-zA-Z0-9_-]{11})",
+    ]
+    for p in patterns:
+        m = re.search(p, url)
+        if m:
+            return m.group(1)
+    return None
+
+
 def _get_youtube_stream_url(video_id: str) -> str:
     url = f"https://www.youtube.com/watch?v={video_id}"
     opts = {
@@ -86,6 +105,18 @@ class PreprocessRequest(BaseModel):
     sample_fps: float = 8.0
 
 
+class PrimaryIssueModel(BaseModel):
+    joint: str
+    message: str
+
+
+class ComparePoseRequest(BaseModel):
+    video_t: Optional[float] = None
+    score: float
+    limbScores: Optional[dict[str, float]] = None
+    feedback: Optional[PrimaryIssueModel] = None
+
+
 def _download_youtube_to_temp(url: str) -> Path:
     tmp_dir = Path(tempfile.mkdtemp())
     out_path = tmp_dir / "video.%(ext)s"
@@ -105,70 +136,128 @@ def _download_youtube_to_temp(url: str) -> Path:
     raise FileNotFoundError("No video file downloaded")
 
 
-@app.post("/api/preprocess")
-async def preprocess_youtube_for_supermemory(body: PreprocessRequest) -> JSONResponse:
-    """Download a YouTube video, run pose detection on sampled frames, return coordinates for Supermemory."""
-    url = (body.url or "").strip()
-    if not url or "youtube.com" not in url and "youtu.be" not in url:
-        raise HTTPException(status_code=400, detail="A YouTube video URL is required")
-    sample_fps = max(0.5, min(30.0, body.sample_fps))
-    tmp_path = None
+def _cuda_available() -> bool:
     try:
-        tmp_path = _download_youtube_to_temp(url)
-        cap = cv2.VideoCapture(str(tmp_path))
-        if not cap.isOpened():
-            raise HTTPException(status_code=502, detail="Could not open downloaded video")
-        video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        frame_interval = max(1, int(round(video_fps / sample_fps)))
-        frames_out = []
-        frame_index = 0
-        read_index = 0
-        duration_ms = cap.get(cv2.CAP_PROP_FRAME_COUNT) / video_fps * 1000.0
-        interval_ms = 1000.0 / sample_fps
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
 
-        frames_out = []
-        t_ms = 0.0
 
-        while t_ms < duration_ms:
-            cap.set(cv2.CAP_PROP_POS_MSEC, t_ms)
+def _run_pose_preprocess(cap: cv2.VideoCapture, sample_fps: float) -> list:
+    """Run pose detection on sampled frames. Uses YOLOv8-pose (GPU) if available, else MediaPipe."""
+    video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_interval = max(1, int(round(video_fps / sample_fps)))
+    frames_out = []
+    frame_idx = 0
+
+    try:
+        from ultralytics import YOLO
+
+        model = YOLO("yolov8n-pose.pt")  # Uses GPU if available
+        use_half = _cuda_available()
+
+        while True:
             ret, frame_bgr = cap.read()
             if not ret:
                 break
+            if frame_idx % frame_interval != 0:
+                frame_idx += 1
+                continue
 
-            # Resize BEFORE inference (huge speed gain)
-            frame_bgr = cv2.resize(frame_bgr, (256, 256))
+            t_ms = frame_idx / video_fps * 1000.0
+            frame_small = cv2.resize(frame_bgr, (256, 256))
+            results = model(
+                frame_small,
+                verbose=False,
+                imgsz=256,
+                half=use_half,
+            )
+            kps = results[0].keypoints
+            xyn = kps.xyn
+            conf = kps.conf
+            if xyn is not None and len(xyn) > 0:
+                xy = xyn[0].cpu().numpy()
+                cf = conf[0].cpu().numpy() if conf is not None else None
+                landmarks = []
+                for i in range(xy.shape[0]):
+                    x, y = float(xy[i][0]), float(xy[i][1])
+                    c = float(cf[i]) if cf is not None and i < len(cf) else 1.0
+                    landmarks.append([x, y, c])
+                if landmarks:
+                    frames_out.append({
+                        "index": len(frames_out),
+                        "t": round(t_ms / 1000.0, 3),
+                        "ms": round(t_ms, 1),
+                        "landmarks": landmarks,
+                    })
+            frame_idx += 1
+        return frames_out
+    except ImportError:
+        pass
 
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            results = pose_detector.process(frame_rgb)
+    # Fallback: MediaPipe (CPU)
+    frame_idx = 0
+    while True:
+        ret, frame_bgr = cap.read()
+        if not ret:
+            break
+        if frame_idx % frame_interval != 0:
+            frame_idx += 1
+            continue
 
-            if results.pose_landmarks:
-                landmarks = [
-                    [lm.x, lm.y, lm.z]
-                    for lm in results.pose_landmarks.landmark
-                ]
+        t_ms = frame_idx / video_fps * 1000.0
+        frame_bgr = cv2.resize(frame_bgr, (256, 256))
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        results = pose_detector.process(frame_rgb)
 
-                frames_out.append({
-                    "index": len(frames_out),
-                    "t": round(t_ms / 1000.0, 3),
-                    "ms": round(t_ms, 1),
-                    "landmarks": landmarks,
-                })
+        if results.pose_landmarks:
+            landmarks = [[lm.x, lm.y, lm.z] for lm in results.pose_landmarks.landmark]
+            frames_out.append({
+                "index": len(frames_out),
+                "t": round(t_ms / 1000.0, 3),
+                "ms": round(t_ms, 1),
+                "landmarks": landmarks,
+            })
+        frame_idx += 1
+    return frames_out
 
-            t_ms += interval_ms
+
+@app.post("/api/compare-pose")
+async def compare_pose(body: ComparePoseRequest) -> JSONResponse:
+    """Log pose comparison score and coaching feedback from frontend."""
+    parts = [f"video_t={body.video_t}", f"score={body.score:.3f}"]
+    if body.feedback:
+        f = body.feedback
+        parts.append(f'feedback: "{f.message}"')
+    elif body.limbScores:
+        parts.append("limbs=" + ",".join(f"{k}={v:.2f}" for k, v in sorted(body.limbScores.items())[:4]))
+    print(f"[compare-pose] {' '.join(parts)}")
+    return JSONResponse(content={"ok": True, "score": body.score})
+
+
+@app.post("/api/preprocess")
+async def preprocess_youtube_for_supermemory(body: PreprocessRequest) -> JSONResponse:
+    """Stream YouTube video, run pose detection (GPU via YOLOv8 when available) on sampled frames."""
+    url = (body.url or "").strip()
+    video_id = _extract_youtube_video_id(url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="A YouTube video URL is required")
+    sample_fps = max(0.5, min(30.0, body.sample_fps))
+
+    try:
+        stream_url = _get_youtube_stream_url(video_id)
+        cap = cv2.VideoCapture(stream_url)
+        if not cap.isOpened():
+            raise HTTPException(status_code=502, detail="Could not open video stream")
+
+        frames_out = _run_pose_preprocess(cap, sample_fps)
+        cap.release()
+        return JSONResponse(content={"frames": frames_out})
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preprocess failed: {e}") from e
-    finally:
-        if tmp_path and tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-            try:
-                tmp_path.parent.rmdir()
-            except OSError:
-                pass
 
 
 @app.get("/api/youtube/{video_id}")
