@@ -61,3 +61,12 @@ The pipeline runs on Modal: **Perplexity** (research) → **GPT-4o** (synthesis)
 4. Set `MODAL_VIDEO_ENDPOINT` to your deployed web endpoint URL (e.g. `https://your-workspace--formai-video-generate.modal.run`) and run the backend.
 
 Without `MODAL_VIDEO_ENDPOINT` or the API keys, the AI tab will show an error when you click Generate; the YouTube tab and pose demo still work.
+
+### Voice coaching (ElevenLabs, optional)
+
+For spoken coaching that works automatically in Chrome (without requiring a user gesture), set:
+
+- `ELEVENLABS_API_KEY` – your [ElevenLabs](https://elevenlabs.io) API key (backend only; never sent to the frontend).
+- `ELEVENLABS_VOICE_ID` – optional; default is `21m00Tcm4TlvDq8ikWAM` (Rachel).
+
+The backend proxies TTS at `POST /api/tts`. If the key is not set, coaching falls back to browser speech plus per-limb tones.

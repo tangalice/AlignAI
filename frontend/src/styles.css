@@ -550,14 +550,39 @@ body {
   background: #3fb0ff;
 }
 
-.coaching-feedback {
+.coaching-row {
   margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.coaching-feedback {
+  flex: 1;
+  min-width: 120px;
   padding: 10px 14px;
   font-size: 0.95rem;
   color: #fff;
   background: rgba(255, 159, 67, 0.2);
   border: 1px solid rgba(255, 159, 67, 0.5);
   border-radius: 10px;
+}
+
+.voice-coach-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: #ccc;
+  user-select: none;
+}
+
+.voice-coach-toggle input {
+  width: 18px;
+  height: 18px;
+  accent-color: #ff9f43;
 }
 
 @media (min-width: 900px) {

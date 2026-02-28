@@ -223,6 +223,58 @@ def _run_pose_preprocess(cap: cv2.VideoCapture, sample_fps: float) -> list:
     return frames_out
 
 
+class TTSRequest(BaseModel):
+    text: str
+
+
+# ElevenLabs TTS: default API key (override with ELEVENLABS_API_KEY env).
+
+
+def _get_elevenlabs_api_key() -> str:
+    return (os.environ.get("ELEVENLABS_API_KEY") or _ELEVENLABS_API_KEY_DEFAULT or "").strip()
+
+
+@app.get("/api/tts/config")
+async def tts_config() -> JSONResponse:
+    """Return whether ElevenLabs TTS is available (so frontend can prefer it)."""
+    return JSONResponse(content={"enabled": bool(_get_elevenlabs_api_key())})
+
+
+@app.post("/api/tts")
+async def tts_convert(body: TTSRequest) -> StreamingResponse:
+    """Convert text to speech via ElevenLabs; returns MP3 audio."""
+    api_key = _get_elevenlabs_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="ElevenLabs TTS not configured (set ELEVENLABS_API_KEY)")
+    voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM").strip()
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    params = {"output_format": "mp3_22050_32"}
+    payload = {"text": text, "model_id": "eleven_multilingual_v2"}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                url,
+                params=params,
+                json=payload,
+                headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+            )
+    except Exception as e:
+        print(f"[tts] ElevenLabs request failed: {e}")
+        raise HTTPException(status_code=502, detail=f"ElevenLabs request failed: {e}")
+    if r.status_code != 200:
+        print(f"[tts] ElevenLabs error status={r.status_code} body={r.text[:300]}")
+        raise HTTPException(status_code=502, detail=f"ElevenLabs error: {r.status_code} {r.text[:200]}")
+    print(f"[tts] ok text={text[:60]!r} len={len(r.content)}")
+    return StreamingResponse(
+        io.BytesIO(r.content),
+        media_type="audio/mpeg",
+        headers={"Content-Length": str(len(r.content))},
+    )
+
+
 @app.post("/api/compare-pose")
 async def compare_pose(body: ComparePoseRequest) -> JSONResponse:
     """Log pose comparison score and coaching feedback from frontend."""

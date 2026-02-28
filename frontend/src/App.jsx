@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { PoseLandmarker, FilesetResolver, DrawingUtils } from "@mediapipe/tasks-vision";
 import { comparePoseWithCoaching } from "./comparePose";
+import { startVoiceCoaching } from "./voiceCoaching";
 
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
@@ -37,6 +38,7 @@ function App() {
   const [preprocessError, setPreprocessError] = useState(null);
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [coachingFeedback, setCoachingFeedback] = useState(null);
+  const [voiceCoachOn, setVoiceCoachOn] = useState(true);
 
   // Tabs: "youtube" | "ai"
   const [activeTab, setActiveTab] = useState("youtube");
@@ -427,6 +429,23 @@ function App() {
   }, [preprocessResult]);
 
   const lastCompareMsRef = useRef(-Infinity);
+  const lastFetchMsRef = useRef(-Infinity);
+  const voiceCoachingRef = useRef(null);
+
+  useEffect(() => {
+    if (!isStreaming || !isModelReady) return;
+    voiceCoachingRef.current = startVoiceCoaching(() => {});
+    return () => {
+      if (voiceCoachingRef.current) voiceCoachingRef.current.reset();
+      voiceCoachingRef.current = null;
+    };
+  }, [isStreaming, isModelReady]);
+
+  useEffect(() => {
+    if (activeTab !== "youtube" && voiceCoachingRef.current) {
+      voiceCoachingRef.current.reset();
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     if (!isStreaming || !isModelReady) return;
@@ -474,7 +493,7 @@ function App() {
 
         const liveLandmarks = result.landmarks[0].map((lm) => [lm.x, lm.y, lm.z]);
         const now = performance.now();
-        if (now - lastCompareMsRef.current >= 1000 / 8) {
+        if (now - lastCompareMsRef.current >= 1000 / 15) {
           lastCompareMsRef.current = now;
           const refs = referenceFramesRef.current;
           const ytVideo = ytVideoRef.current;
@@ -494,11 +513,17 @@ function App() {
                 { landmarks: liveLandmarks }
               );
               setCoachingFeedback(feedback);
-              fetch(`${apiBase}/api/compare-pose`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ video_t: videoT, score, limbScores, feedback }),
-              }).catch(() => {});
+              if (voiceCoachOn && voiceCoachingRef.current) {
+                voiceCoachingRef.current.onFrame({ score, limbScores });
+              }
+              if (now - lastFetchMsRef.current >= 500) {
+                lastFetchMsRef.current = now;
+                fetch(`${apiBase}/api/compare-pose`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ video_t: videoT, score, limbScores, feedback }),
+                }).catch(() => {});
+              }
             } else {
               setCoachingFeedback(null);
             }
@@ -792,9 +817,20 @@ function App() {
             <video ref={videoRef} autoPlay playsInline muted className="video hidden-video" aria-hidden="true" />
             <canvas ref={outputCanvasRef} className="video" />
           </div>
-          {coachingFeedback && (
-            <div className="coaching-feedback">{coachingFeedback.message}</div>
-          )}
+          <div className="coaching-row">
+            {coachingFeedback && (
+              <div className="coaching-feedback">{coachingFeedback.message}</div>
+            )}
+            <label className="voice-coach-toggle">
+              <input
+                type="checkbox"
+                checked={voiceCoachOn}
+                onChange={(e) => setVoiceCoachOn(e.target.checked)}
+                aria-label="Toggle voice coaching"
+              />
+              <span>Voice coach</span>
+            </label>
+          </div>
         </section>
       </main>
 
