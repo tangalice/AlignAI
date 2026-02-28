@@ -562,7 +562,7 @@ function App() {
                     onCanPlay={() => setYtLoading(false)}
                     onError={(e) => {
                       setYtLoading(false);
-                      setYtError("Video failed to load. Is the backend running on port 8000?");
+                      setYtError("Video failed to load. Is the backend running on port 8001?");
                     }}
                   />
                   {ytLoading && (

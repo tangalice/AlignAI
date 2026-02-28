@@ -1,6 +1,13 @@
 import io
 import os
 import tempfile
+
+# Fix SSL certs on macOS (python.org installs)
+try:
+    import certifi
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+except ImportError:
+    pass
 from pathlib import Path
 from typing import Optional
 
@@ -289,5 +296,5 @@ async def pose_on_frame(file: UploadFile = File(...)) -> StreamingResponse:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("pose_server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("pose_server:app", host="0.0.0.0", port=8001, reload=True)
 

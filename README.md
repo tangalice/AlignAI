@@ -2,26 +2,47 @@
 
 Simple demo with a React frontend that runs a MediaPipe Pose model in WebAssembly directly in the browser and shows it on live webcam video.
 
-## Frontend (React + Vite)
+## Quick start
 
-The frontend lives in the `frontend` folder.
-
-- **Install dependencies**:
+From the project root:
 
 ```bash
-cd frontend
-npm install
+# Backend (Terminal 1)
+./run-backend.sh
+
+# Frontend (Terminal 2)
+./run-frontend.sh
 ```
 
-- **Run the dev server**:
+Then open **http://localhost:8000** in your browser. Run `npm install` in `frontend/` the first time.
+
+---
+
+## Manual setup
+
+### Backend
 
 ```bash
+cd FormAI
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python pose_server.py
+```
+
+Runs at `http://localhost:8001`.
+
+### Frontend
+
+```bash
+cd FormAI/frontend
+npm install
 npm run dev
 ```
 
-By default this runs on `http://localhost:5173`.
+Runs at `http://localhost:8000`.
 
-When you open the app in the browser, allow webcam access. You should see your live camera feed and an annotated video where the pose skeleton is overlaid, powered entirely in-browser by a WebAssembly MediaPipe Pose model (no Python backend needed).
+When you open the app, allow webcam access. You should see your live camera feed and an annotated video where the pose skeleton is overlaid, powered entirely in-browser by a WebAssembly MediaPipe Pose model (no Python backend needed).
 
 ## Tabs
 
