@@ -1,13 +1,21 @@
 import io
+import os
 from typing import Optional
 
 import cv2
+import httpx
 import mediapipe as mp
 import numpy as np
 import yt_dlp
+from pydantic import BaseModel
+
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
+
+
+class AIVideoRequest(BaseModel):
+    prompt: str
 
 
 app = FastAPI(title="FormAI Pose Server", version="0.1.0")
@@ -102,6 +110,53 @@ def _annotate_pose_on_frame(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
         connection_drawing_spec=mp_drawing.DrawingSpec(color=(255, 0, 0), thickness=2, circle_radius=2),
     )
     return annotated
+
+
+MODAL_VIDEO_ENDPOINT = os.environ.get("MODAL_VIDEO_ENDPOINT", "").rstrip("/")
+
+
+@app.post("/api/ai-video/generate")
+async def ai_video_generate(body: AIVideoRequest) -> StreamingResponse:
+    """Generate a workout/exercise video from a text description via Modal.com."""
+    prompt = (body.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Missing or empty prompt")
+
+    if not MODAL_VIDEO_ENDPOINT:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "AI video generation is not configured. Set MODAL_VIDEO_ENDPOINT to your Modal "
+                "deployed endpoint (e.g. https://your-app--generate.modal.run)."
+            ),
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            r = await client.post(MODAL_VIDEO_ENDPOINT, json={"prompt": prompt})
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="Video generation timed out. Try again or use a shorter description.",
+        ) from None
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Modal request failed: {e}") from e
+
+    if r.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=r.text or f"Modal returned {r.status_code}",
+        )
+
+    content = r.content
+    if not content:
+        raise HTTPException(status_code=502, detail="Empty response from Modal")
+
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="video/mp4",
+        headers={"Content-Disposition": "inline; filename=ai-workout.mp4"},
+    )
 
 
 @app.post("/pose/frame")

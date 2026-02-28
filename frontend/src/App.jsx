@@ -10,8 +10,9 @@ function getYouTubeVideoId(url) {
   const trimmed = url.trim();
   const watchMatch = trimmed.match(/(?:youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})/);
   const shortMatch = trimmed.match(/(?:youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+  const shortsMatch = trimmed.match(/(?:youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/);
   const embedMatch = trimmed.match(/(?:youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/);
-  return watchMatch?.[1] ?? shortMatch?.[1] ?? embedMatch?.[1] ?? null;
+  return watchMatch?.[1] ?? shortMatch?.[1] ?? shortsMatch?.[1] ?? embedMatch?.[1] ?? null;
 }
 
 function App() {
@@ -31,11 +32,64 @@ function App() {
   const [ytLoading, setYtLoading] = useState(false);
   const [ytError, setYtError] = useState(null);
 
+  // Tabs: "youtube" | "ai"
+  const [activeTab, setActiveTab] = useState("youtube");
+  const [aiDescription, setAiDescription] = useState("");
+  const [aiVideoUrl, setAiVideoUrl] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState(null);
+  const [aiPlaying, setAiPlaying] = useState(false);
+  const [aiProgress, setAiProgress] = useState(0);
+  const [aiDuration, setAiDuration] = useState(0);
+  const [aiVolume, setAiVolume] = useState(100);
+  const [aiSpeed, setAiSpeed] = useState(1);
+
   const ytVideoRef = useRef(null);
+  const aiVideoRef = useRef(null);
   const ytProgressIntervalRef = useRef(null);
 
   const youtubeVideoId = getYouTubeVideoId(youtubeUrl);
   const ytVideoSrc = youtubeVideoId ? `/api/youtube/${youtubeVideoId}` : null;
+
+  const apiBase = import.meta.env.VITE_API_BASE || "";
+
+  const handleGenerateAiVideo = async () => {
+    const prompt = (aiDescription || "").trim();
+    if (!prompt) {
+      setAiError("Please enter a description for the workout/exercise video.");
+      return;
+    }
+    setAiError(null);
+    setAiLoading(true);
+    if (aiVideoUrl) {
+      URL.revokeObjectURL(aiVideoUrl);
+      setAiVideoUrl(null);
+    }
+    try {
+      const res = await fetch(`${apiBase}/api/ai-video/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `Generation failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      setAiVideoUrl(url);
+    } catch (err) {
+      setAiError(err.message || "Failed to generate video.");
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (aiVideoUrl) URL.revokeObjectURL(aiVideoUrl);
+    };
+  }, [aiVideoUrl]);
 
   // Sync playback rate and volume when video element or state changes
   useEffect(() => {
@@ -44,6 +98,13 @@ function App() {
     el.playbackRate = ytSpeed;
     el.volume = ytVolume / 100;
   }, [ytSpeed, ytVolume, ytVideoSrc]);
+
+  useEffect(() => {
+    const el = aiVideoRef.current;
+    if (!el) return;
+    el.playbackRate = aiSpeed;
+    el.volume = aiVolume / 100;
+  }, [aiSpeed, aiVolume, aiVideoUrl]);
 
   // Progress tick when playing
   useEffect(() => {
@@ -56,6 +117,17 @@ function App() {
     }, 250);
     return () => clearInterval(id);
   }, [ytPlaying]);
+
+  useEffect(() => {
+    if (!aiPlaying) return;
+    const id = setInterval(() => {
+      const el = aiVideoRef.current;
+      if (!el) return;
+      const d = el.duration;
+      if (Number.isFinite(d) && d > 0) setAiProgress((el.currentTime / d) * 100);
+    }, 250);
+    return () => clearInterval(id);
+  }, [aiPlaying]);
 
   const handleYtPlayPause = () => {
     const el = ytVideoRef.current;
@@ -92,6 +164,42 @@ function App() {
   const handleYtSpeed = (e) => {
     const value = Number(e.target.value);
     setYtSpeed(value);
+  };
+
+  const handleAiPlayPause = () => {
+    const el = aiVideoRef.current;
+    if (!el) return;
+    if (aiPlaying) el.pause();
+    else el.play().catch(() => {});
+  };
+
+  const handleAiTimeUpdate = () => {
+    const el = aiVideoRef.current;
+    if (!el) return;
+    const d = el.duration;
+    if (Number.isFinite(d) && d > 0) {
+      setAiDuration(d);
+      setAiProgress((el.currentTime / d) * 100);
+    }
+  };
+
+  const handleAiSeek = (e) => {
+    const value = Number(e.target.value);
+    const el = aiVideoRef.current;
+    if (!el || !Number.isFinite(el.duration)) return;
+    el.currentTime = (value / 100) * el.duration;
+    setAiProgress(value);
+  };
+
+  const handleAiVolume = (e) => {
+    const value = Math.round(Number(e.target.value));
+    setAiVolume(value);
+    const el = aiVideoRef.current;
+    if (el) el.volume = value / 100;
+  };
+
+  const handleAiSpeed = (e) => {
+    setAiSpeed(Number(e.target.value));
   };
 
   useEffect(() => {
@@ -220,32 +328,82 @@ function App() {
     };
   }, [isStreaming, isModelReady]);
 
+  const leftPanelTitle = activeTab === "youtube" ? "YouTube Video" : "AI Generated Video";
+
   return (
     <div className="app">
       <header className="header">
         <h1>FormAI Pose Demo</h1>
-        <p>Paste a YouTube video link and compare with live pose estimation from your webcam.</p>
+        <p>
+          {activeTab === "youtube"
+            ? "Paste a YouTube video link and compare with live pose estimation from your webcam."
+            : "Describe a workout or exercise and generate an AI video to compare with your webcam."}
+        </p>
       </header>
 
-      <div className="input-row">
-        <label className="input-label" htmlFor="youtube-url">
-          YouTube video link
-        </label>
-        <input
-          id="youtube-url"
-          type="url"
-          className="youtube-input"
-          placeholder="https://www.youtube.com/watch?v=..."
-          value={youtubeUrl}
-          onChange={(e) => setYoutubeUrl(e.target.value)}
-        />
+      <div className="tabs">
+        <button
+          type="button"
+          className={`tab ${activeTab === "youtube" ? "tab-active" : ""}`}
+          onClick={() => setActiveTab("youtube")}
+        >
+          YouTube Video
+        </button>
+        <button
+          type="button"
+          className={`tab ${activeTab === "ai" ? "tab-active" : ""}`}
+          onClick={() => setActiveTab("ai")}
+        >
+          AI Generated Video
+        </button>
       </div>
+
+      {activeTab === "youtube" && (
+        <div className="input-row">
+          <label className="input-label" htmlFor="youtube-url">
+            YouTube video link
+          </label>
+          <input
+            id="youtube-url"
+            type="url"
+            className="youtube-input"
+            placeholder="https://www.youtube.com/watch?v=... or /shorts/..."
+            value={youtubeUrl}
+            onChange={(e) => setYoutubeUrl(e.target.value)}
+          />
+        </div>
+      )}
+
+      {activeTab === "ai" && (
+        <div className="input-row">
+          <label className="input-label" htmlFor="ai-description">
+            Describe the workout or exercise video
+          </label>
+          <textarea
+            id="ai-description"
+            className="ai-description-input"
+            placeholder="e.g. Person doing jumping jacks in a gym, 10 seconds"
+            value={aiDescription}
+            onChange={(e) => setAiDescription(e.target.value)}
+            rows={3}
+          />
+          <button
+            type="button"
+            className="generate-btn"
+            onClick={handleGenerateAiVideo}
+            disabled={aiLoading}
+          >
+            {aiLoading ? "Generating…" : "Generate Video"}
+          </button>
+          {aiError && <div className="ai-error">{aiError}</div>}
+        </div>
+      )}
 
       <main className="side-by-side">
         <section className="panel">
-          <h2>YouTube Video</h2>
+          <h2>{leftPanelTitle}</h2>
           <div className="youtube-video-wrap">
-            {ytVideoSrc ? (
+            {activeTab === "youtube" && ytVideoSrc ? (
               <>
                 <div className="youtube-video-area">
                   <video
@@ -335,6 +493,96 @@ function App() {
                   </div>
                 </div>
               </>
+            ) : activeTab === "ai" && (aiLoading || aiVideoUrl) ? (
+              <>
+                <div className="youtube-video-area">
+                  {aiLoading ? (
+                    <div className="youtube-loading-overlay">
+                      Generating video… This may take a few minutes.
+                    </div>
+                  ) : aiVideoUrl ? (
+                    <video
+                      ref={aiVideoRef}
+                      src={aiVideoUrl}
+                      className="youtube-native-video"
+                      playsInline
+                      preload="auto"
+                      onPlay={() => setAiPlaying(true)}
+                      onPause={() => setAiPlaying(false)}
+                      onTimeUpdate={handleAiTimeUpdate}
+                      onLoadedMetadata={(e) => setAiDuration(e.target.duration ?? 0)}
+                      onEnded={() => setAiProgress(0)}
+                    />
+                  ) : null}
+                </div>
+                {aiVideoUrl && (
+                  <div className="player-controls">
+                    <button
+                      type="button"
+                      className="control-btn play-pause"
+                      onClick={handleAiPlayPause}
+                      aria-label={aiPlaying ? "Pause" : "Play"}
+                    >
+                      {aiPlaying ? (
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                          <rect x="6" y="4" width="4" height="16" rx="1" />
+                          <rect x="14" y="4" width="4" height="16" rx="1" />
+                        </svg>
+                      ) : (
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                      )}
+                    </button>
+                    <div className="progress-wrap">
+                      <input
+                        type="range"
+                        className="progress-range"
+                        min="0"
+                        max="100"
+                        step="0.1"
+                        value={aiProgress}
+                        onInput={handleAiSeek}
+                        aria-label="Seek"
+                      />
+                    </div>
+                    <div className="volume-wrap">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71V20.77c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
+                      </svg>
+                      <input
+                        type="range"
+                        className="volume-range"
+                        min="0"
+                        max="100"
+                        value={aiVolume}
+                        onInput={handleAiVolume}
+                        aria-label="Volume"
+                      />
+                    </div>
+                    <div className="speed-wrap">
+                      <span className="speed-label" title="Playback speed">Speed</span>
+                      <input
+                        type="range"
+                        className="speed-range"
+                        min="0.25"
+                        max="2"
+                        step="0.25"
+                        value={aiSpeed}
+                        onInput={handleAiSpeed}
+                        aria-label="Playback speed"
+                      />
+                      <span className="speed-value">{aiSpeed}x</span>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : activeTab === "ai" ? (
+              <div className="youtube-video-area">
+                <div className="youtube-placeholder-top">
+                  Enter a description and click Generate Video (Modal.com backend required)
+                </div>
+              </div>
             ) : (
               <div className="youtube-video-area">
                 <div className="youtube-placeholder-top">

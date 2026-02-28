@@ -38,6 +38,37 @@ body {
   opacity: 0.8;
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+  max-width: 1360px;
+  margin: 0 auto;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.tab {
+  padding: 10px 20px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.7);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.tab:hover {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.tab-active {
+  color: #3fb0ff;
+  border-bottom-color: #3fb0ff;
+}
+
 .input-row {
   width: 100%;
   max-width: 1360px;
@@ -340,6 +371,57 @@ body {
 .youtube-input:focus {
   border-color: rgba(63, 176, 255, 0.5);
   box-shadow: 0 0 0 2px rgba(63, 176, 255, 0.15);
+}
+
+.ai-description-input {
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.25);
+  color: inherit;
+  outline: none;
+  resize: vertical;
+  min-height: 80px;
+}
+
+.ai-description-input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.ai-description-input:focus {
+  border-color: rgba(63, 176, 255, 0.5);
+  box-shadow: 0 0 0 2px rgba(63, 176, 255, 0.15);
+}
+
+.generate-btn {
+  padding: 10px 24px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #0a0a12;
+  background: #3fb0ff;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.generate-btn:hover:not(:disabled) {
+  background: #5fc0ff;
+}
+
+.generate-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.ai-error {
+  margin-top: 8px;
+  font-size: 0.9rem;
+  color: #ffb3b8;
 }
 
 .youtube-embed {
