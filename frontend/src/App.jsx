@@ -5,14 +5,94 @@ const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
 const WASM_BASE_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm";
 
+function getYouTubeVideoId(url) {
+  if (!url || typeof url !== "string") return null;
+  const trimmed = url.trim();
+  const watchMatch = trimmed.match(/(?:youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})/);
+  const shortMatch = trimmed.match(/(?:youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+  const embedMatch = trimmed.match(/(?:youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/);
+  return watchMatch?.[1] ?? shortMatch?.[1] ?? embedMatch?.[1] ?? null;
+}
+
 function App() {
   const videoRef = useRef(null);
   const outputCanvasRef = useRef(null);
   const poseLandmarkerRef = useRef(null);
 
+  const [youtubeUrl, setYoutubeUrl] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [isModelReady, setIsModelReady] = useState(false);
   const [error, setError] = useState(null);
+  const [ytPlaying, setYtPlaying] = useState(false);
+  const [ytProgress, setYtProgress] = useState(0);
+  const [ytDuration, setYtDuration] = useState(0);
+  const [ytVolume, setYtVolume] = useState(100);
+  const [ytSpeed, setYtSpeed] = useState(1);
+  const [ytLoading, setYtLoading] = useState(false);
+  const [ytError, setYtError] = useState(null);
+
+  const ytVideoRef = useRef(null);
+  const ytProgressIntervalRef = useRef(null);
+
+  const youtubeVideoId = getYouTubeVideoId(youtubeUrl);
+  const ytVideoSrc = youtubeVideoId ? `/api/youtube/${youtubeVideoId}` : null;
+
+  // Sync playback rate and volume when video element or state changes
+  useEffect(() => {
+    const el = ytVideoRef.current;
+    if (!el) return;
+    el.playbackRate = ytSpeed;
+    el.volume = ytVolume / 100;
+  }, [ytSpeed, ytVolume, ytVideoSrc]);
+
+  // Progress tick when playing
+  useEffect(() => {
+    if (!ytPlaying) return;
+    const id = setInterval(() => {
+      const el = ytVideoRef.current;
+      if (!el) return;
+      const d = el.duration;
+      if (Number.isFinite(d) && d > 0) setYtProgress((el.currentTime / d) * 100);
+    }, 250);
+    return () => clearInterval(id);
+  }, [ytPlaying]);
+
+  const handleYtPlayPause = () => {
+    const el = ytVideoRef.current;
+    if (!el) return;
+    if (ytPlaying) el.pause();
+    else el.play().catch(() => {});
+  };
+
+  const handleYtTimeUpdate = () => {
+    const el = ytVideoRef.current;
+    if (!el) return;
+    const d = el.duration;
+    if (Number.isFinite(d) && d > 0) {
+      setYtDuration(d);
+      setYtProgress((el.currentTime / d) * 100);
+    }
+  };
+
+  const handleYtSeek = (e) => {
+    const value = Number(e.target.value);
+    const el = ytVideoRef.current;
+    if (!el || !Number.isFinite(el.duration)) return;
+    el.currentTime = (value / 100) * el.duration;
+    setYtProgress(value);
+  };
+
+  const handleYtVolume = (e) => {
+    const value = Math.round(Number(e.target.value));
+    setYtVolume(value);
+    const el = ytVideoRef.current;
+    if (el) el.volume = value / 100;
+  };
+
+  const handleYtSpeed = (e) => {
+    const value = Number(e.target.value);
+    setYtSpeed(value);
+  };
 
   useEffect(() => {
     let stream;
@@ -144,20 +224,131 @@ function App() {
     <div className="app">
       <header className="header">
         <h1>FormAI Pose Demo</h1>
-        <p>Webcam pose estimation fully in-browser with a WebAssembly MediaPipe model.</p>
+        <p>Paste a YouTube video link and compare with live pose estimation from your webcam.</p>
       </header>
 
-      <main className="grid">
+      <div className="input-row">
+        <label className="input-label" htmlFor="youtube-url">
+          YouTube video link
+        </label>
+        <input
+          id="youtube-url"
+          type="url"
+          className="youtube-input"
+          placeholder="https://www.youtube.com/watch?v=..."
+          value={youtubeUrl}
+          onChange={(e) => setYoutubeUrl(e.target.value)}
+        />
+      </div>
+
+      <main className="side-by-side">
         <section className="panel">
-          <h2>Webcam</h2>
-          <div className="video-container">
-            <video ref={videoRef} autoPlay playsInline muted className="video" />
+          <h2>YouTube Video</h2>
+          <div className="youtube-video-wrap">
+            {ytVideoSrc ? (
+              <>
+                <div className="youtube-video-area">
+                  <video
+                    key={youtubeVideoId}
+                    ref={ytVideoRef}
+                    src={ytVideoSrc}
+                    className="youtube-native-video"
+                    playsInline
+                    preload="auto"
+                    poster={youtubeVideoId ? `https://img.youtube.com/vi/${youtubeVideoId}/hqdefault.jpg` : undefined}
+                    onPlay={() => setYtPlaying(true)}
+                    onPause={() => setYtPlaying(false)}
+                    onTimeUpdate={handleYtTimeUpdate}
+                    onLoadedMetadata={(e) => setYtDuration(e.target.duration ?? 0)}
+                    onEnded={() => setYtProgress(0)}
+                    onLoadStart={() => { setYtLoading(true); setYtError(null); }}
+                    onCanPlay={() => setYtLoading(false)}
+                    onError={(e) => {
+                      setYtLoading(false);
+                      setYtError("Video failed to load. Is the backend running on port 8000?");
+                    }}
+                  />
+                  {ytLoading && (
+                    <div className="youtube-loading-overlay">Loading video…</div>
+                  )}
+                  {ytError && (
+                    <div className="youtube-error-overlay">{ytError}</div>
+                  )}
+                </div>
+                <div className="player-controls">
+                  <button
+                    type="button"
+                    className="control-btn play-pause"
+                    onClick={handleYtPlayPause}
+                    aria-label={ytPlaying ? "Pause" : "Play"}
+                  >
+                    {ytPlaying ? (
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <rect x="6" y="4" width="4" height="16" rx="1" />
+                        <rect x="14" y="4" width="4" height="16" rx="1" />
+                      </svg>
+                    ) : (
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
+                    )}
+                  </button>
+                  <div className="progress-wrap">
+                    <input
+                      type="range"
+                      className="progress-range"
+                      min="0"
+                      max="100"
+                      step="0.1"
+                      value={ytProgress}
+                      onInput={handleYtSeek}
+                      aria-label="Seek"
+                    />
+                  </div>
+                  <div className="volume-wrap">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71V20.77c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
+                    </svg>
+                    <input
+                      type="range"
+                      className="volume-range"
+                      min="0"
+                      max="100"
+                      value={ytVolume}
+                      onInput={handleYtVolume}
+                      aria-label="Volume"
+                    />
+                  </div>
+                  <div className="speed-wrap">
+                    <span className="speed-label" title="Playback speed">Speed</span>
+                    <input
+                      type="range"
+                      className="speed-range"
+                      min="0.25"
+                      max="2"
+                      step="0.25"
+                      value={ytSpeed}
+                      onInput={handleYtSpeed}
+                      aria-label="Playback speed"
+                    />
+                    <span className="speed-value">{ytSpeed}x</span>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="youtube-video-area">
+                <div className="youtube-placeholder-top">
+                  Paste a YouTube link to display the video (backend required)
+                </div>
+              </div>
+            )}
           </div>
         </section>
 
         <section className="panel">
           <h2>Pose Model Output (WASM)</h2>
           <div className="video-container output">
+            <video ref={videoRef} autoPlay playsInline muted className="video hidden-video" aria-hidden="true" />
             <canvas ref={outputCanvasRef} className="video" />
           </div>
         </section>

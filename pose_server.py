@@ -4,9 +4,10 @@ from typing import Optional
 import cv2
 import mediapipe as mp
 import numpy as np
+import yt_dlp
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 
 
 app = FastAPI(title="FormAI Pose Server", version="0.1.0")
@@ -34,6 +35,46 @@ pose_detector = mp_pose.Pose(
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+def _get_youtube_stream_url(video_id: str) -> str:
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": False,
+        "noplaylist": True,
+        # Prefer a single, muxed stream that an HTML5 <video> can play.
+        # (Avoid HLS/DASH manifests and video-only / audio-only streams.)
+        "format": "best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none][vcodec!=none]",
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if not info:
+        raise HTTPException(status_code=404, detail="Video not found")
+    # Prefer direct url (set when format selector picks one)
+    if info.get("url"):
+        return info["url"]
+    # Otherwise pick best format with a URL and video
+    formats = info.get("formats") or []
+    for f in reversed(formats):
+        if f.get("url") and (f.get("vcodec") or "none") != "none":
+            return f["url"]
+    raise HTTPException(status_code=404, detail="No stream URL found")
+
+
+@app.get("/api/youtube/{video_id}")
+async def youtube_stream(video_id: str) -> RedirectResponse:
+    if not video_id or len(video_id) > 20:
+        raise HTTPException(status_code=400, detail="Invalid video ID")
+    try:
+        stream_url = _get_youtube_stream_url(video_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not get stream: {e}") from e
+    # Let the browser fetch the media directly (supports Range/seek).
+    return RedirectResponse(url=stream_url, status_code=307)
 
 
 def _read_image_from_upload(file: UploadFile) -> np.ndarray:
