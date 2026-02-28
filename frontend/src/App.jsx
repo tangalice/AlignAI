@@ -30,6 +30,10 @@ function App() {
   const [ytSpeed, setYtSpeed] = useState(1);
   const [ytLoading, setYtLoading] = useState(false);
   const [ytError, setYtError] = useState(null);
+  const [preprocessLoading, setPreprocessLoading] = useState(false);
+  const [preprocessResult, setPreprocessResult] = useState(null);
+  const [preprocessError, setPreprocessError] = useState(null);
+  const [copyFeedback, setCopyFeedback] = useState(false);
 
   const ytVideoRef = useRef(null);
   const ytProgressIntervalRef = useRef(null);
@@ -92,6 +96,141 @@ function App() {
   const handleYtSpeed = (e) => {
     const value = Number(e.target.value);
     setYtSpeed(value);
+  };
+
+  const handlePreprocess = async () => {
+    const url = youtubeUrl.trim();
+    if (!url) {
+      setPreprocessError("Paste a YouTube link first.");
+      return;
+    }
+    const video = ytVideoRef.current;
+    if (!video) {
+      setPreprocessError("Load the YouTube video first (press play once).");
+      return;
+    }
+    if (!Number.isFinite(video.duration) || video.duration <= 0) {
+      setPreprocessError("Video metadata not loaded yet. Wait until the video is ready.");
+      return;
+    }
+
+    const seekTo = (timeSec) =>
+      new Promise((resolve, reject) => {
+        const el = ytVideoRef.current;
+        if (!el) {
+          reject(new Error("Video element not available"));
+          return;
+        }
+        const onSeeked = () => {
+          el.removeEventListener("seeked", onSeeked);
+          el.removeEventListener("error", onError);
+          resolve();
+        };
+        const onError = (e) => {
+          el.removeEventListener("seeked", onSeeked);
+          el.removeEventListener("error", onError);
+          reject(e?.error || new Error("Seek failed"));
+        };
+        el.addEventListener("seeked", onSeeked);
+        el.addEventListener("error", onError);
+        const clamped = Math.min(Math.max(timeSec, 0), el.duration || timeSec);
+        el.currentTime = clamped;
+      });
+
+    setPreprocessLoading(true);
+    setPreprocessError(null);
+    setPreprocessResult(null);
+
+    const originalPaused = video.paused;
+    const originalTime = video.currentTime;
+    const originalRate = video.playbackRate;
+
+    let offlineLandmarker = null;
+
+    try {
+      // Create a fresh pose landmarker in IMAGE mode so we don't share video
+      // timestamps with the live webcam graph.
+      const vision = await FilesetResolver.forVisionTasks(WASM_BASE_URL);
+      offlineLandmarker = await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: MODEL_URL },
+        runningMode: "IMAGE",
+        numPoses: 1,
+      });
+
+      video.pause();
+      video.playbackRate = 1;
+
+      const duration = video.duration;
+      const targetFps = 30; // logical timeline resolution for Supermemory
+      const step = 1 / targetFps;
+
+      const frames = [];
+      let index = 0;
+
+      for (let t = 0; t <= duration; t += step) {
+        // eslint-disable-next-line no-await-in-loop
+        await seekTo(t);
+        const tsMs = t * 1000;
+        const result = offlineLandmarker.detect(video);
+
+        let landmarks = [];
+        if (result.landmarks && result.landmarks.length > 0) {
+          // Only keep the first pose; each landmark is [x, y, z].
+          landmarks = result.landmarks[0].map((lm) => [lm.x, lm.y, lm.z]);
+        }
+
+        frames.push({
+          index,
+          t: Number(t.toFixed(3)),
+          ms: Math.round(tsMs),
+          landmarks,
+        });
+        index += 1;
+      }
+
+      const payload = {
+        source_url: url,
+        duration_sec: Number(duration.toFixed(3)),
+        sample_fps: targetFps,
+        frame_count: frames.length,
+        frames,
+      };
+
+      setPreprocessResult(JSON.stringify(payload, null, 2));
+    } catch (err) {
+      setPreprocessError(
+        err instanceof Error ? err.message : "Preprocess failed in browser. Try again or shorten the video."
+      );
+    } finally {
+      try {
+        if (offlineLandmarker) offlineLandmarker.close();
+      } catch {
+        // ignore
+      }
+      try {
+        video.currentTime = originalTime;
+        video.playbackRate = originalRate;
+        if (!originalPaused) {
+          // resume playback best-effort
+          // eslint-disable-next-line @typescript-eslint/no-floating-promises
+          video.play().catch(() => {});
+        }
+      } catch {
+        // ignore restore errors
+      }
+      setPreprocessLoading(false);
+    }
+  };
+
+  const handleCopyPreprocess = async () => {
+    if (!preprocessResult) return;
+    try {
+      await navigator.clipboard.writeText(preprocessResult);
+      setCopyFeedback(true);
+      setTimeout(() => setCopyFeedback(false), 2000);
+    } catch (_) {
+      setPreprocessError("Copy failed");
+    }
   };
 
   useEffect(() => {
@@ -353,6 +492,44 @@ function App() {
           </div>
         </section>
       </main>
+
+      <section className="panel preprocess-section">
+        <h2>Preprocess for Supermemory</h2>
+        <p className="preprocess-desc">
+          Extract pose coordinates from the YouTube link above so you can paste them into Supermemory and compare later with your webcam.
+        </p>
+        <div className="preprocess-actions">
+          <button
+            type="button"
+            className="preprocess-btn"
+            onClick={handlePreprocess}
+            disabled={preprocessLoading || !youtubeUrl.trim()}
+          >
+            {preprocessLoading ? "Extracting…" : "Extract pose coordinates"}
+          </button>
+        </div>
+        {preprocessError && (
+          <div className="preprocess-error">{preprocessError}</div>
+        )}
+        {preprocessResult && (
+          <div className="preprocess-output">
+            <textarea
+              readOnly
+              className="preprocess-textarea"
+              value={preprocessResult}
+              spellCheck={false}
+              aria-label="Pose coordinates JSON"
+            />
+            <button
+              type="button"
+              className="copy-btn"
+              onClick={handleCopyPreprocess}
+            >
+              {copyFeedback ? "Copied!" : "Copy for Supermemory"}
+            </button>
+          </div>
+        )}
+      </section>
 
       {(!isModelReady || !isStreaming) && !error && (
         <div className="placeholder" style={{ textAlign: "center", marginTop: "8px" }}>
