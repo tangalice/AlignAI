@@ -666,27 +666,28 @@ async def preprocess_youtube_for_supermemory(body: PreprocessRequest) -> JSONRes
 
 @app.get("/api/youtube/{video_id}")
 async def youtube_stream(video_id: str):
-    """Serve a YouTube video as a same-origin MP4 file so WebGL/MediaPipe can read pixels safely."""
+    """Stream YouTube video through the backend so the browser loads from our origin (no redirect to YouTube)."""
     if not video_id or len(video_id) > 20:
         raise HTTPException(status_code=400, detail="Invalid video ID")
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    tmp_path: Path | None = None
     try:
-        tmp_path = _download_youtube_to_temp(url)
-        data = tmp_path.read_bytes()
+        stream_url = _get_youtube_stream_url(video_id)
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Could not download video: {e}") from e
-    finally:
-        if tmp_path and tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-            try:
-                tmp_path.parent.rmdir()
-            except OSError:
-                pass
-    return StreamingResponse(io.BytesIO(data), media_type="video/mp4")
+        raise HTTPException(status_code=502, detail=f"Could not get stream: {e}") from e
+
+    async def stream_body():
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+            async with client.stream("GET", stream_url) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+
+    return StreamingResponse(
+        stream_body(),
+        media_type="video/mp4",
+        headers={"Accept-Ranges": "bytes"},
+    )
 
 
 def _read_image_from_upload(file: UploadFile) -> np.ndarray:
@@ -768,7 +769,7 @@ async def ai_video_generate_sse(body: AIVideoRequest):
 @app.get("/api/ai-video/download/{gen_id}")
 async def ai_video_download(gen_id: str):
     if not MODAL_VIDEO_DOWNLOAD_BASE:
-        raise HTTPException(status_code=503, detail="Set MODAL_VIDEO_ENDPOINT")
+        raise HTTPException(status_code=503, detail="Set MODAL_VIDEO_DOWNLOAD_BASE")
     download_url = f"{MODAL_VIDEO_DOWNLOAD_BASE}/download/{gen_id}"
 
     async with httpx.AsyncClient(timeout=600.0) as client:

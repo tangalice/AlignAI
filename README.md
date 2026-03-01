@@ -58,9 +58,9 @@ The pipeline runs on Modal: **Perplexity** (research + prompt writing) → **Gro
    - Secret name: `formai-video-keys`
    - Keys: `PERPLEXITY_API_KEY`, `XAI_API_KEY`
 3. Deploy: `modal deploy modal_video_app`
-4. Set `MODAL_VIDEO_ENDPOINT` to your deployed web endpoint URL (e.g. `https://your-workspace--formai-video-generate.modal.run`) and run the backend.
+4. Set `MODAL_VIDEO_DOWNLOAD_BASE` and `MODAL_VIDEO_GENERATE_ENDPOINT` to your deployed web endpoint URL (e.g. `https://your-workspace--formai-video-generate.modal.run`) and run the backend.
 
-Without `MODAL_VIDEO_ENDPOINT` or the API keys, the AI tab will show an error when you click Generate; the Exercise tab and pose demo still work if `YMOVE_API_KEY` is set.
+Without `MODAL_VIDEO_DOWNLOAD_BASE` and `MODAL_VIDEO_GENERATE_ENDPOINT` or the API keys, the AI tab will show an error when you click Generate; the Exercise tab and pose demo still work if `YMOVE_API_KEY` is set.
 
 ### Voice coaching (ElevenLabs, optional)
 

@@ -58,6 +58,7 @@ function App() {
   const [coachingFeedback, setCoachingFeedback] = useState(null);
   const [voiceCoachOn, setVoiceCoachOn] = useState(true);
   const [llmCoachingAvailable, setLlmCoachingAvailable] = useState(false);
+  const [isPastedYoutubeShort, setIsPastedYoutubeShort] = useState(false);
 
   // Tabs: "youtube" | "ai"
   const [activeTab, setActiveTab] = useState("youtube");
@@ -80,9 +81,12 @@ function App() {
   const ytProgressIntervalRef = useRef(null);
   const ytSkeletonCanvasRef = useRef(null);
 
-  const ytVideoSrc = referenceVideoUrl || null;
-
   const apiBase = import.meta.env.VITE_API_BASE || "";
+  const ytVideoSrc = referenceVideoUrl || null;
+  const isYoutubeVideo = Boolean(
+    referenceVideoUrl && String(referenceVideoUrl).includes("/api/youtube/")
+  );
+  const youtubeVideoIdFromUrl = referenceVideoUrl?.match(/\/api\/youtube\/([^/?#]+)/)?.[1] ?? null;
 
   useEffect(() => {
     fetch(`${apiBase}/api/coaching/llm/config`)
@@ -91,13 +95,39 @@ function App() {
       .catch(() => setLlmCoachingAvailable(false));
   }, [apiBase]);
 
-  // Search exercises (debounced, AbortController cancels stale requests)
+  // When user pastes a YouTube link in the exercise input, use it as the video source (no iframe; backend streams via redirect).
+  useEffect(() => {
+    if (activeTab !== "youtube") return;
+    const trimmed = exerciseSearchQuery.trim();
+    const videoId = getYouTubeVideoId(trimmed);
+    if (videoId) {
+      setReferenceVideoUrl(`${apiBase}/api/youtube/${videoId}`);
+      setIsPastedYoutubeShort(trimmed.toLowerCase().includes("shorts"));
+      setReferenceExerciseId(null);
+      setReferenceExerciseMuscle("");
+      setReferenceExerciseName("");
+      setPreprocessError(null);
+      setPreprocessResult(null);
+      setExerciseSearchFocused(false);
+      setExerciseResults([]);
+    } else if (referenceVideoUrl && String(referenceVideoUrl).includes("/api/youtube/")) {
+      setReferenceVideoUrl("");
+      setIsPastedYoutubeShort(false);
+      setReferenceExerciseId(null);
+      setReferenceExerciseMuscle("");
+      setReferenceExerciseName("");
+      setPreprocessResult(null);
+    }
+  }, [exerciseSearchQuery, activeTab, apiBase, referenceVideoUrl]);
+
+  // Search exercises (debounced, AbortController cancels stale requests); skip when input is a YouTube link
   const exerciseSearchTimeoutRef = useRef(null);
   const exerciseSearchAbortRef = useRef(null);
   useEffect(() => {
     if (exerciseSearchTimeoutRef.current) clearTimeout(exerciseSearchTimeoutRef.current);
     if (activeTab !== "youtube") return;
     const q = exerciseSearchQuery.trim();
+    if (getYouTubeVideoId(q)) return;
     const doSearch = async () => {
       if (exerciseSearchAbortRef.current) exerciseSearchAbortRef.current.abort();
       exerciseSearchAbortRef.current = new AbortController();
@@ -146,6 +176,7 @@ function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Could not find video");
       setReferenceVideoUrl(data.video_url);
+      setIsPastedYoutubeShort(false);
       setReferenceExerciseId(exercise.id);
       setReferenceExerciseMuscle((exercise.muscle || "").toLowerCase());
       setReferenceExerciseName(exercise.name || "");
@@ -916,14 +947,14 @@ function App() {
       {activeTab === "youtube" && (
         <div className="input-row exercise-search-row">
           <label className="input-label" htmlFor="exercise-search">
-            Search workout (YMove Exercise API)
+            Search exercises or paste a YouTube link
           </label>
           <div className="exercise-search-wrap">
             <input
               id="exercise-search"
               type="text"
               className="youtube-input"
-              placeholder="e.g. Bicycle Crunches, Push-Ups, Squats..."
+              placeholder="e.g. Bicycle Crunches, Push-Ups, Squats — or https://youtube.com/watch?v=..."
               value={exerciseSearchQuery}
               onChange={(e) => setExerciseSearchQuery(e.target.value)}
               onFocus={() => setExerciseSearchFocused(true)}
@@ -1018,7 +1049,9 @@ function App() {
           <div className="youtube-video-wrap">
             {activeTab === "youtube" && ytVideoSrc ? (
               <>
-                <div className="youtube-video-area">
+                <div
+                  className={`youtube-video-area ${isYoutubeVideo && !isPastedYoutubeShort ? "video-area-youtube" : "video-area-preset"}`}
+                >
                   <video
                     key={referenceExerciseId || referenceVideoUrl}
                     ref={ytVideoRef}
@@ -1028,6 +1061,7 @@ function App() {
                     loop
                     preload="auto"
                     crossOrigin="anonymous"
+                    poster={youtubeVideoIdFromUrl ? `https://img.youtube.com/vi/${youtubeVideoIdFromUrl}/hqdefault.jpg` : undefined}
                     onPlay={() => setYtPlaying(true)}
                     onPause={() => setYtPlaying(false)}
                     onTimeUpdate={handleYtTimeUpdate}
@@ -1035,9 +1069,9 @@ function App() {
                     onEnded={() => setYtProgress(0)}
                     onLoadStart={() => { setYtLoading(true); setYtError(null); }}
                     onCanPlay={() => setYtLoading(false)}
-                    onError={(e) => {
+                    onError={() => {
                       setYtLoading(false);
-                      setYtError("Video failed to load. Is the backend running on port 8001?");
+                      setYtError("Video failed to load. Is the backend running?");
                     }}
                   />
                   <canvas
@@ -1203,9 +1237,9 @@ function App() {
                 </div>
               </div>
             ) : (
-              <div className="youtube-video-area">
+              <div className="youtube-video-area video-area-preset">
                 <div className="youtube-placeholder-top">
-                  Search for an exercise above to load the demo video
+                  Search for an exercise or paste a YouTube link to load the demo video
                 </div>
               </div>
             )}
