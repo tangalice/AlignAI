@@ -1576,7 +1576,20 @@ function App() {
             {workoutSummaryLoading && <div className="workout-summary-loading">Generating your AI summary…</div>}
             {workoutSummary && !workoutSummaryLoading && (
               <>
-                <div className="workout-summary-content">{workoutSummary}</div>
+                <div
+                  className="workout-summary-content"
+                  dangerouslySetInnerHTML={{
+                    __html: (() => {
+                      const t = workoutSummary
+                        .replace(/\s*\[\d+\]\s*/g, " ")
+                        .replace(/&/g, "&amp;")
+                        .replace(/</g, "&lt;")
+                        .replace(/>/g, "&gt;")
+                        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+                      return t.replace(/\n/g, "<br />");
+                    })(),
+                  }}
+                />
                 {repCount > 0 && <div className="workout-reps">Reps completed: {repCount}</div>}
               </>
             )}
@@ -1625,7 +1638,7 @@ function App() {
 
       <Toast message={toast} onDismiss={() => setToast(null)} type="error" />
 
-      <CoachPanel />
+      <CoachPanel apiBase={apiBase} />
     </div>
   );
 }

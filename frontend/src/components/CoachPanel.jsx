@@ -9,9 +9,8 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "";
-
-export function CoachPanel() {
+export function CoachPanel({ apiBase: apiBaseProp }) {
+  const apiBase = apiBaseProp ?? import.meta.env.VITE_API_BASE ?? "";
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState("chat"); // "chat" | "progress" | "report"
   const [messages, setMessages] = useState([
@@ -19,6 +18,7 @@ export function CoachPanel() {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [coachAvailable, setCoachAvailable] = useState(true);
   const [progress, setProgress] = useState({ entries: [], trend: "unknown", alert: null });
   const [ptReport, setPtReport] = useState(null);
   const [ptLoading, setPtLoading] = useState(false);
@@ -30,12 +30,21 @@ export function CoachPanel() {
 
   useEffect(() => {
     if (open) {
-      fetch(`${API_BASE}/api/progress?user_id=default`)
+      fetch(`${apiBase}/api/coach/status`)
+        .then((r) => r.json())
+        .then((d) => setCoachAvailable(d.available !== false))
+        .catch(() => setCoachAvailable(false));
+    }
+  }, [open, apiBase]);
+
+  useEffect(() => {
+    if (open) {
+      fetch(`${apiBase}/api/progress?user_id=default`)
         .then((r) => r.json())
         .then(setProgress)
         .catch(() => setProgress({ entries: [], trend: "unknown", alert: null }));
     }
-  }, [open]);
+  }, [open, apiBase]);
 
   const handleSend = async () => {
     const text = input.trim();
@@ -46,22 +55,27 @@ export function CoachPanel() {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000);
     try {
-      const res = await fetch(`${API_BASE}/api/coach/chat`, {
+      const res = await fetch(`${apiBase}/api/coach/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, user_id: "default" }),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
-      const data = await res.json();
-      const msg = data.message || data.error || "Sorry, I couldn't respond.";
+      let data = {};
+      try {
+        data = await res.json();
+      } catch {
+        data = { message: "Invalid response from server." };
+      }
+      const msg = data.message || data.error || data.detail || "Sorry, I couldn't respond.";
       setMessages((m) => [...m, { role: "assistant", content: msg }]);
     } catch (err) {
       clearTimeout(timeoutId);
       const isTimeout = err?.name === "AbortError";
       setMessages((m) => [
         ...m,
-        { role: "assistant", content: isTimeout ? "Request timed out. Please try again." : "Connection error. Please try again." },
+        { role: "assistant", content: isTimeout ? "Request timed out. Please try again." : "Connection error. Check that the server is running and try again." },
       ]);
     } finally {
       setLoading(false);
@@ -79,7 +93,7 @@ export function CoachPanel() {
     if (ptLoading) return;
     setPtLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/coach/pt-report`, {
+      const res = await fetch(`${apiBase}/api/coach/pt-report`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason: progress.alert || "user_requested", user_id: "default" }),
@@ -133,6 +147,11 @@ export function CoachPanel() {
 
           {tab === "chat" && (
             <div className="coach-chat">
+              {!coachAvailable && (
+                <div className="coach-unavailable">
+                  Coach is unavailable. Set OPENAI_API_KEY in the server .env and restart the server.
+                </div>
+              )}
               <div className="coach-messages">
                 {messages.map((m, i) => (
                   <div key={i} className={`coach-msg ${m.role}`}>
@@ -147,13 +166,13 @@ export function CoachPanel() {
                   ref={inputRef}
                   type="text"
                   className="coach-input"
-                  placeholder="Ask about your workouts..."
+                  placeholder={coachAvailable ? "Ask about your workouts..." : "Coach unavailable"}
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  disabled={loading}
+                  disabled={loading || !coachAvailable}
                 />
-                <button type="button" className="coach-send" onClick={handleSend} disabled={loading || !input.trim()}>Send</button>
+                <button type="button" className="coach-send" onClick={handleSend} disabled={loading || !input.trim() || !coachAvailable}>Send</button>
               </div>
             </div>
           )}

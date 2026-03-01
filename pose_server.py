@@ -588,11 +588,11 @@ class TTSRequest(BaseModel):
     text: str
 
 
-# ElevenLabs TTS: default API key (override with ELEVENLABS_API_KEY env).
+# ElevenLabs TTS: set ELEVENLABS_API_KEY in env to enable.
 
 
 def _get_elevenlabs_api_key() -> str:
-    return (os.environ.get("ELEVENLABS_API_KEY") or _ELEVENLABS_API_KEY_DEFAULT or "").strip()
+    return (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
 
 
 @app.get("/api/tts/config")
@@ -890,21 +890,22 @@ async def workout_summary(request: Request, body: WorkoutSummaryRequest) -> JSON
 - Feedback moments: {'; '.join(unique_feedback[:5]) if unique_feedback else 'none'}"""
 
     system_prompt = """You are a friendly, encouraging fitness coach. The user just finished a form-check workout session.
-Generate a short, informative AI summary (2-4 paragraphs) that:
-1. Opens with a brief overall assessment — what went well, energy level, etc.
+Generate a concise summary (2-3 short paragraphs) that:
+1. Opens with a brief overall assessment — what went well, energy level.
 2. Highlights 1-2 things they did well (be specific, reference the data).
 3. Suggests 1-2 actionable improvements for next time (body part or form cue).
 4. Ends on an encouraging note.
 
-Be concise, warm, and specific. Use plain language. Avoid generic fluff. Reference the actual areas flagged (arms, legs, torso, etc.) when relevant. 
-Format as readable paragraphs, no bullet points or headers unless you want one short "What to work on" line."""
+Be concise, warm, and specific. Use plain language. No bullet points or headers.
+Do not include any citations, reference numbers, or [1][2][3] style references.
+Use plain text only — no markdown (no ** for bold)."""
 
     try:
         from openai import AsyncOpenAI
 
         if PPLX_API_KEY:
             client = AsyncOpenAI(api_key=PPLX_API_KEY, base_url="https://api.perplexity.ai")
-            model = "llama-3.1-sonar-small-128k-online"
+            model = "sonar"
         else:
             client = AsyncOpenAI(api_key=OPENAI_API_KEY)
             model = "gpt-4o-mini"
@@ -920,6 +921,9 @@ Format as readable paragraphs, no bullet points or headers unless you want one s
         summary = ""
         if r.choices and len(r.choices) > 0:
             summary = (r.choices[0].message.content or "").strip()
+        # Remove citation refs [1][2][3] and markdown bold asterisks so UI stays clean
+        summary = re.sub(r"\s*\[\d+\]\s*", " ", summary).strip()
+        summary = re.sub(r"\*\*([^*]+)\*\*", r"\1", summary)
         if not summary:
             summary = "Your workout session was recorded. Keep practicing to improve your form!"
 
@@ -977,11 +981,21 @@ async def get_progress_api(user_id: str = "default") -> JSONResponse:
         return JSONResponse(content={"entries": [], "trend": "unknown", "alert": None})
 
 
+@app.get("/api/coach/status")
+async def coach_status() -> JSONResponse:
+    """Check if the AI coach is available (PPLX or OPENAI API key set)."""
+    available = bool(PPLX_API_KEY or OPENAI_API_KEY)
+    return JSONResponse(content={
+        "available": available,
+        "reason": None if available else "Set PPLX_API_KEY or OPENAI_API_KEY in .env to enable the coach.",
+    })
+
+
 @app.post("/api/coach/chat")
 async def coach_chat(request: Request, body: CoachChatRequest) -> JSONResponse:
-    """AI coach chatbot with user context from Supermemory."""
-    if not OPENAI_API_KEY:
-        return JSONResponse(status_code=503, content={"error": "OPENAI_API_KEY not set", "message": ""})
+    """AI coach chatbot with user context from Supermemory. Uses Perplexity if PPLX_API_KEY set, else OpenAI."""
+    if not PPLX_API_KEY and not OPENAI_API_KEY:
+        return JSONResponse(status_code=503, content={"error": "No API key", "message": "Coach is unavailable. Set PPLX_API_KEY or OPENAI_API_KEY in the server .env to enable the AI coach."})
     client = getattr(request, "client", None)
     if client and not _check_rate_limit(client.host or "unknown"):
         raise HTTPException(status_code=429, detail="Too many requests.")
@@ -1001,14 +1015,20 @@ async def coach_chat(request: Request, body: CoachChatRequest) -> JSONResponse:
         system = """You are a friendly, knowledgeable fitness coach who knows this user from their FormAI workout history. 
 You have access to their past sessions, form feedback, and progress. Be conversational, supportive, and specific.
 Reference their data when relevant. Keep responses concise (2-4 sentences unless they ask for more).
-If they mention pain, injury, or concerning symptoms, gently suggest they consult a physical therapist."""
+If they mention pain, injury, or concerning symptoms, gently suggest they consult a physical therapist.
+Do not include any citations or [1][2][3] style references. Use plain text only."""
 
         user_content = f"Context about this user:\n{rag}\n\nUser says: {msg}"
 
         from openai import AsyncOpenAI
-        oai = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        if PPLX_API_KEY:
+            oai = AsyncOpenAI(api_key=PPLX_API_KEY, base_url="https://api.perplexity.ai")
+            model = "sonar"
+        else:
+            oai = AsyncOpenAI(api_key=OPENAI_API_KEY)
+            model = "gpt-4o-mini"
         r = await oai.chat.completions.create(
-            model="gpt-4o-mini",
+            model=model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_content},
@@ -1019,6 +1039,9 @@ If they mention pain, injury, or concerning symptoms, gently suggest they consul
         reply = ""
         if r.choices and len(r.choices) > 0:
             reply = (r.choices[0].message.content or "").strip()
+        # Strip Perplexity citation refs if present
+        reply = re.sub(r"\s*\[\d+\]\s*", " ", reply).strip()
+        reply = re.sub(r"\*\*([^*]+)\*\*", r"\1", reply)
         if not reply:
             reply = "I'm here to help with your workouts. Could you try asking again?"
         return reply
@@ -1031,7 +1054,13 @@ If they mention pain, injury, or concerning symptoms, gently suggest they consul
         return JSONResponse(status_code=504, content={"message": "I'm taking too long. Please try a shorter question."})
     except Exception as e:
         print(f"[coach-chat] error: {e}")
-        return JSONResponse(status_code=502, content={"message": "Sorry, I couldn't process that. Try again."})
+        msg = "Sorry, I couldn't process that. Try again."
+        err_str = str(e)
+        if "429" in err_str or "quota" in err_str.lower() or "insufficient_quota" in err_str:
+            msg = "OpenAI API quota exceeded. Check your plan and billing at platform.openai.com, or try again later."
+        elif "rate" in err_str.lower() and "limit" in err_str.lower():
+            msg = "Rate limit reached. Please wait a moment and try again."
+        return JSONResponse(status_code=502, content={"message": msg})
 
 
 @app.post("/api/coach/pt-report")

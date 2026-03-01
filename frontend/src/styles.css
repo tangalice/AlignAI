@@ -1061,6 +1061,15 @@ body {
   min-height: 0;
 }
 
+.coach-unavailable {
+  padding: 10px 12px;
+  margin: 12px;
+  font-size: 0.85rem;
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
+  border-radius: 8px;
+}
+
 .coach-messages {
   flex: 1;
   overflow-y: auto;
