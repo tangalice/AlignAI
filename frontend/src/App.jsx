@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { PoseLandmarker, FilesetResolver, DrawingUtils } from "@mediapipe/tasks-vision";
 import { comparePoseWithCoaching } from "./comparePose";
 import { startVoiceCoaching } from "./voiceCoaching";
@@ -6,6 +6,16 @@ import { startVoiceCoaching } from "./voiceCoaching";
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
 const WASM_BASE_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm";
+
+function scoreToColors(score) {
+  if (score == null || score < 0) return { primary: "#3fb0ff", accent: "#ff3f81" };
+  if (score >= 90) return { primary: "#22c55e", accent: "#4ade80" };
+  if (score >= 80) return { primary: "#4ade80", accent: "#86efac" };
+  if (score >= 70) return { primary: "#a3e635", accent: "#bef264" };
+  if (score >= 50) return { primary: "#eab308", accent: "#facc15" };
+  if (score >= 30) return { primary: "#f97316", accent: "#fb923c" };
+  return { primary: "#ef4444", accent: "#f87171" };
+}
 
 function getYouTubeVideoId(url) {
   if (!url || typeof url !== "string") return null;
@@ -22,7 +32,16 @@ function App() {
   const outputCanvasRef = useRef(null);
   const poseLandmarkerRef = useRef(null);
 
-  const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [referenceVideoUrl, setReferenceVideoUrl] = useState("");
+  const [referenceExerciseId, setReferenceExerciseId] = useState(null);
+  const [referenceExerciseMuscle, setReferenceExerciseMuscle] = useState("");
+  const [referenceExerciseName, setReferenceExerciseName] = useState("");
+  const [exerciseSearchQuery, setExerciseSearchQuery] = useState("");
+  const [exerciseResults, setExerciseResults] = useState([]);
+  const [exerciseSearchSuggestions, setExerciseSearchSuggestions] = useState([]);
+  const [exerciseSearchLoading, setExerciseSearchLoading] = useState(false);
+  const [exerciseSearchFocused, setExerciseSearchFocused] = useState(false);
+  const [exerciseVideoLoading, setExerciseVideoLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isModelReady, setIsModelReady] = useState(false);
   const [error, setError] = useState(null);
@@ -36,9 +55,9 @@ function App() {
   const [preprocessLoading, setPreprocessLoading] = useState(false);
   const [preprocessResult, setPreprocessResult] = useState(null);
   const [preprocessError, setPreprocessError] = useState(null);
-  const [copyFeedback, setCopyFeedback] = useState(false);
   const [coachingFeedback, setCoachingFeedback] = useState(null);
   const [voiceCoachOn, setVoiceCoachOn] = useState(true);
+  const [llmCoachingAvailable, setLlmCoachingAvailable] = useState(false);
 
   // Tabs: "youtube" | "ai"
   const [activeTab, setActiveTab] = useState("youtube");
@@ -55,11 +74,85 @@ function App() {
   const ytVideoRef = useRef(null);
   const aiVideoRef = useRef(null);
   const ytProgressIntervalRef = useRef(null);
+  const ytSkeletonCanvasRef = useRef(null);
 
-  const youtubeVideoId = getYouTubeVideoId(youtubeUrl);
-  const ytVideoSrc = youtubeVideoId ? `/api/youtube/${youtubeVideoId}` : null;
+  const ytVideoSrc = referenceVideoUrl || null;
 
   const apiBase = import.meta.env.VITE_API_BASE || "";
+
+  useEffect(() => {
+    fetch(`${apiBase}/api/coaching/llm/config`)
+      .then((r) => r.json())
+      .then((d) => setLlmCoachingAvailable(Boolean(d.enabled)))
+      .catch(() => setLlmCoachingAvailable(false));
+  }, [apiBase]);
+
+  // Search exercises (debounced, AbortController cancels stale requests)
+  const exerciseSearchTimeoutRef = useRef(null);
+  const exerciseSearchAbortRef = useRef(null);
+  useEffect(() => {
+    if (exerciseSearchTimeoutRef.current) clearTimeout(exerciseSearchTimeoutRef.current);
+    if (activeTab !== "youtube") return;
+    const q = exerciseSearchQuery.trim();
+    const doSearch = async () => {
+      if (exerciseSearchAbortRef.current) exerciseSearchAbortRef.current.abort();
+      exerciseSearchAbortRef.current = new AbortController();
+      const signal = exerciseSearchAbortRef.current.signal;
+      setExerciseSearchLoading(true);
+      setExerciseSearchSuggestions([]);
+      try {
+        const res = await fetch(`${apiBase}/api/exercises/search?q=${encodeURIComponent(q)}&limit=15`, { signal });
+        const data = await res.json();
+        setExerciseResults(data.exercises || []);
+        setExerciseSearchSuggestions(data.suggestions || []);
+      } catch (err) {
+        if (err.name === "AbortError") return;
+        setExerciseResults([]);
+        setExerciseSearchSuggestions([]);
+      } finally {
+        if (!signal.aborted) setExerciseSearchLoading(false);
+      }
+    };
+    if (!q) {
+      doSearch();
+      return;
+    }
+    exerciseSearchTimeoutRef.current = setTimeout(doSearch, 80);
+    return () => {
+      if (exerciseSearchTimeoutRef.current) clearTimeout(exerciseSearchTimeoutRef.current);
+    };
+  }, [exerciseSearchQuery, activeTab, apiBase]);
+
+  const exerciseVideoAbortRef = useRef(null);
+  const handleSelectExercise = useCallback(async (exercise) => {
+    if (exerciseVideoAbortRef.current) exerciseVideoAbortRef.current.abort();
+    exerciseVideoAbortRef.current = new AbortController();
+    const signal = exerciseVideoAbortRef.current.signal;
+    setExerciseVideoLoading(true);
+    setReferenceVideoUrl("");
+    setReferenceExerciseId(null);
+    setReferenceExerciseMuscle("");
+    setReferenceExerciseName("");
+    setPreprocessError(null);
+    setPreprocessResult(null);
+    setExerciseSearchFocused(false);
+    setExerciseResults([]);
+    try {
+      const res = await fetch(`${apiBase}/api/exercises/video?id=${encodeURIComponent(exercise.id)}`, { signal });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Could not find video");
+      setReferenceVideoUrl(data.video_url);
+      setReferenceExerciseId(exercise.id);
+      setReferenceExerciseMuscle((exercise.muscle || "").toLowerCase());
+      setReferenceExerciseName(exercise.name || "");
+      setExerciseSearchQuery("");
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      setPreprocessError(err.message || "Could not find exercise video. Try another exercise.");
+    } finally {
+      if (!signal.aborted) setExerciseVideoLoading(false);
+    }
+  }, [apiBase]);
 
   const handleGenerateAiVideo = async () => {
     const prompt = (aiDescription || "").trim();
@@ -210,15 +303,14 @@ function App() {
     setAiSpeed(Number(e.target.value));
   };
 
-  const handlePreprocess = async () => {
-    const url = youtubeUrl.trim();
-    if (!url) {
-      setPreprocessError("Paste a YouTube link first.");
+  const handlePreprocess = useCallback(async () => {
+    if (!referenceVideoUrl) {
+      setPreprocessError("Select an exercise first.");
       return;
     }
     const video = ytVideoRef.current;
     if (!video) {
-      setPreprocessError("Load the YouTube video first (press play once).");
+      setPreprocessError("Load the exercise video first.");
       return;
     }
     if (!Number.isFinite(video.duration) || video.duration <= 0) {
@@ -301,7 +393,7 @@ function App() {
       }
 
       const payload = {
-        source_url: url,
+        source_url: referenceVideoUrl,
         duration_sec: Number(duration.toFixed(3)),
         sample_fps: targetFps,
         frame_count: frames.length,
@@ -332,18 +424,7 @@ function App() {
       }
       setPreprocessLoading(false);
     }
-  };
-
-  const handleCopyPreprocess = async () => {
-    if (!preprocessResult) return;
-    try {
-      await navigator.clipboard.writeText(preprocessResult);
-      setCopyFeedback(true);
-      setTimeout(() => setCopyFeedback(false), 2000);
-    } catch (_) {
-      setPreprocessError("Copy failed");
-    }
-  };
+  }, [referenceVideoUrl]);
 
   useEffect(() => {
     let stream;
@@ -414,6 +495,29 @@ function App() {
   }, []);
 
   const referenceFramesRef = useRef(null);
+  const lastPreprocessedExerciseIdRef = useRef(null);
+
+  // Auto-extract pose coordinates when exercise video loads
+  useEffect(() => {
+    if (
+      activeTab !== "youtube" ||
+      !referenceVideoUrl ||
+      !referenceExerciseId ||
+      !(ytDuration > 0) ||
+      preprocessLoading ||
+      lastPreprocessedExerciseIdRef.current === referenceExerciseId
+    ) {
+      return;
+    }
+    lastPreprocessedExerciseIdRef.current = referenceExerciseId;
+    handlePreprocess();
+  }, [activeTab, referenceVideoUrl, referenceExerciseId, ytDuration, preprocessLoading, handlePreprocess]);
+
+  useEffect(() => {
+    if (!referenceExerciseId) {
+      lastPreprocessedExerciseIdRef.current = null;
+    }
+  }, [referenceExerciseId]);
 
   useEffect(() => {
     if (!preprocessResult) {
@@ -431,6 +535,13 @@ function App() {
   const lastCompareMsRef = useRef(-Infinity);
   const lastFetchMsRef = useRef(-Infinity);
   const voiceCoachingRef = useRef(null);
+  const voiceCoachOnRef = useRef(voiceCoachOn);
+  voiceCoachOnRef.current = voiceCoachOn;
+  const llmCoachingAvailableRef = useRef(llmCoachingAvailable);
+  llmCoachingAvailableRef.current = llmCoachingAvailable;
+  const lastLlmFetchMsRef = useRef(-Infinity);
+  const compareScoreRef = useRef(null); // 0–100, for overlay and skeleton color
+  const [comparisonScore, setComparisonScore] = useState(null); // synced for UI display
 
   useEffect(() => {
     if (!isStreaming || !isModelReady) return;
@@ -446,6 +557,12 @@ function App() {
       voiceCoachingRef.current.reset();
     }
   }, [activeTab]);
+
+  useEffect(() => {
+    if (!voiceCoachOn && voiceCoachingRef.current) {
+      voiceCoachingRef.current.cancel();
+    }
+  }, [voiceCoachOn]);
 
   useEffect(() => {
     if (!isStreaming || !isModelReady) return;
@@ -478,15 +595,17 @@ function App() {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
       const drawingUtils = new DrawingUtils(ctx);
+      const score = compareScoreRef.current;
+      const colors = scoreToColors(score);
 
       if (result.landmarks && result.landmarks.length > 0) {
         for (const landmarks of result.landmarks) {
           drawingUtils.drawLandmarks(landmarks, {
             radius: 3,
-            color: "#3fb0ff",
+            color: colors.primary,
           });
           drawingUtils.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS, {
-            color: "#ff3f81",
+            color: colors.accent,
             lineWidth: 2,
           });
         }
@@ -510,11 +629,53 @@ function App() {
             if (closest?.landmarks?.length) {
               const { score, limbScores, feedback } = comparePoseWithCoaching(
                 { landmarks: closest.landmarks },
-                { landmarks: liveLandmarks }
+                { landmarks: liveLandmarks },
+                { exerciseMuscle: referenceExerciseMuscle }
               );
+              const score100 = Math.round(score * 100);
+              compareScoreRef.current = score100;
+              setComparisonScore(score100);
               setCoachingFeedback(feedback);
-              if (voiceCoachOn && voiceCoachingRef.current) {
-                voiceCoachingRef.current.onFrame({ score, limbScores });
+              if (voiceCoachOnRef.current && voiceCoachingRef.current) {
+                const willFetchLlm =
+                  llmCoachingAvailableRef.current &&
+                  feedback?.message &&
+                  score < 0.9 &&
+                  now - lastLlmFetchMsRef.current >= 5000;
+                voiceCoachingRef.current.onFrame(
+                  { score, limbScores, feedback },
+                  { deferToLlm: willFetchLlm }
+                );
+              }
+              if (
+                llmCoachingAvailableRef.current &&
+                feedback?.message &&
+                score < 0.9 &&
+                now - lastLlmFetchMsRef.current >= 5000
+              ) {
+                lastLlmFetchMsRef.current = now;
+                fetch(`${apiBase}/api/coaching/llm`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    score,
+                    limbScores,
+                    feedback_message: feedback.message,
+                    worst_limb: feedback.joint,
+                    exercise_name: referenceExerciseName,
+                    exercise_muscle: referenceExerciseMuscle,
+                  }),
+                })
+                  .then((r) => r.json())
+                  .then((d) => {
+                    if (d.message) {
+                      setCoachingFeedback({ joint: feedback.joint, message: d.message });
+                      if (voiceCoachOnRef.current && voiceCoachingRef.current?.speak) {
+                        voiceCoachingRef.current.speak(d.message);
+                      }
+                    }
+                  })
+                  .catch(() => {});
               }
               if (now - lastFetchMsRef.current >= 500) {
                 lastFetchMsRef.current = now;
@@ -525,10 +686,32 @@ function App() {
                 }).catch(() => {});
               }
             } else {
+              compareScoreRef.current = null;
+              setComparisonScore(null);
               setCoachingFeedback(null);
             }
+          } else {
+            compareScoreRef.current = null;
+            setComparisonScore(null);
+            if (activeTab === "youtube") setCoachingFeedback(null);
           }
         }
+      }
+
+      if (score != null && score >= 0) {
+        const pad = 12;
+        const fontPx = Math.min(48, canvas.height * 0.12);
+        ctx.font = `bold ${fontPx}px system-ui, sans-serif`;
+        const text = `${score}%`;
+        const metrics = ctx.measureText(text);
+        const w = metrics.width + pad * 2;
+        const h = fontPx + pad * 2;
+        const x = canvas.width - w - pad;
+        const y = pad;
+        ctx.fillStyle = "rgba(0,0,0,0.6)";
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = colors.primary;
+        ctx.fillText(text, x + pad, y + h - pad - 4);
       }
 
       ctx.restore();
@@ -540,13 +723,97 @@ function App() {
     return () => {
       if (animationFrameId) cancelAnimationFrame(animationFrameId);
     };
-  }, [isStreaming, isModelReady, activeTab, apiBase]);
+  }, [isStreaming, isModelReady, activeTab, apiBase, referenceExerciseMuscle, referenceExerciseName]);
 
   useEffect(() => {
     if (activeTab !== "youtube") setCoachingFeedback(null);
   }, [activeTab]);
 
-  const leftPanelTitle = activeTab === "youtube" ? "YouTube Video" : "AI Generated Video";
+  // Draw skeleton overlay on YouTube video from reference frames
+  useEffect(() => {
+    if (activeTab !== "youtube") return;
+
+    let animationFrameId;
+
+    const drawYtSkeleton = () => {
+      const video = ytVideoRef.current;
+      const canvas = ytSkeletonCanvasRef.current;
+      const refs = referenceFramesRef.current;
+
+      if (!video || !canvas || !refs?.length || !Number.isFinite(video.currentTime)) {
+        animationFrameId = requestAnimationFrame(drawYtSkeleton);
+        return;
+      }
+
+      const parent = canvas.parentElement;
+      if (parent) {
+        const w = parent.clientWidth;
+        const h = parent.clientHeight;
+        if (canvas.width !== w || canvas.height !== h) {
+          canvas.width = w;
+          canvas.height = h;
+        }
+      }
+
+      const ctx = canvas.getContext("2d");
+      const videoT = video.currentTime;
+      const closest = refs.reduce((a, b) =>
+        Math.abs(a.t - videoT) <= Math.abs(b.t - videoT) ? a : b
+      );
+
+      if (!closest?.landmarks?.length) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        animationFrameId = requestAnimationFrame(drawYtSkeleton);
+        return;
+      }
+
+      const cw = canvas.width;
+      const ch = canvas.height;
+      const vw = video.videoWidth || 1;
+      const vh = video.videoHeight || 1;
+      const scale = Math.min(cw / vw, ch / vh);
+      const drawW = vw * scale;
+      const drawH = vh * scale;
+      const offsetX = (cw - drawW) / 2;
+      const offsetY = (ch - drawH) / 2;
+
+      const toScreen = (x, y) => ({
+        x: offsetX + x * drawW,
+        y: offsetY + y * drawH,
+      });
+
+      ctx.clearRect(0, 0, cw, ch);
+
+      const pts = closest.landmarks.map((lm) => toScreen(lm[0], lm[1]));
+
+      ctx.strokeStyle = "#ff3f81";
+      ctx.fillStyle = "#3fb0ff";
+      ctx.lineWidth = 2;
+
+      for (const [i, j] of PoseLandmarker.POSE_CONNECTIONS) {
+        if (pts[i] && pts[j]) {
+          ctx.beginPath();
+          ctx.moveTo(pts[i].x, pts[i].y);
+          ctx.lineTo(pts[j].x, pts[j].y);
+          ctx.stroke();
+        }
+      }
+      for (const p of pts) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      animationFrameId = requestAnimationFrame(drawYtSkeleton);
+    };
+
+    animationFrameId = requestAnimationFrame(drawYtSkeleton);
+    return () => {
+      if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    };
+  }, [activeTab]);
+
+  const leftPanelTitle = activeTab === "youtube" ? "Exercise Demo" : "AI Generated Video";
 
   return (
     <div className="app">
@@ -554,7 +821,7 @@ function App() {
         <h1>FormAI Pose Demo</h1>
         <p>
           {activeTab === "youtube"
-            ? "Paste a YouTube video link and compare with live pose estimation from your webcam."
+            ? "Search exercises from the YMove database, then compare your form with the demo video."
             : "Describe a workout or exercise and generate an AI video to compare with your webcam."}
         </p>
       </header>
@@ -565,7 +832,7 @@ function App() {
           className={`tab ${activeTab === "youtube" ? "tab-active" : ""}`}
           onClick={() => setActiveTab("youtube")}
         >
-          YouTube Video
+          Exercise Workout
         </button>
         <button
           type="button"
@@ -577,18 +844,65 @@ function App() {
       </div>
 
       {activeTab === "youtube" && (
-        <div className="input-row">
-          <label className="input-label" htmlFor="youtube-url">
-            YouTube video link
+        <div className="input-row exercise-search-row">
+          <label className="input-label" htmlFor="exercise-search">
+            Search workout (YMove Exercise API)
           </label>
-          <input
-            id="youtube-url"
-            type="url"
-            className="youtube-input"
-            placeholder="https://www.youtube.com/watch?v=... or /shorts/..."
-            value={youtubeUrl}
-            onChange={(e) => setYoutubeUrl(e.target.value)}
-          />
+          <div className="exercise-search-wrap">
+            <input
+              id="exercise-search"
+              type="text"
+              className="youtube-input"
+              placeholder="e.g. Bicycle Crunches, Push-Ups, Squats..."
+              value={exerciseSearchQuery}
+              onChange={(e) => setExerciseSearchQuery(e.target.value)}
+              onFocus={() => setExerciseSearchFocused(true)}
+              onBlur={() => setTimeout(() => setExerciseSearchFocused(false), 150)}
+              disabled={exerciseVideoLoading}
+            />
+            {exerciseVideoLoading && (
+              <span className="exercise-search-loading">Loading video…</span>
+            )}
+          </div>
+          {exerciseSearchFocused && exerciseResults.length > 0 && (
+            <ul className="exercise-results">
+              {exerciseResults.map((ex) => (
+                <li key={`${ex.name}-${ex.muscle}`}>
+                  <button
+                    type="button"
+                    className="exercise-result-btn"
+                    onClick={() => handleSelectExercise(ex)}
+                    disabled={exerciseVideoLoading}
+                  >
+                    <span className="exercise-name">{ex.name}</span>
+                    <span className="exercise-meta">{ex.muscle} · {ex.level}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {exerciseSearchFocused && exerciseSearchQuery.trim() && exerciseSearchLoading && exerciseResults.length === 0 && (
+            <div className="exercise-search-hint">Searching…</div>
+          )}
+          {exerciseSearchFocused && exerciseSearchQuery.trim() && !exerciseSearchLoading && exerciseResults.length === 0 && (
+            <div className="exercise-search-empty">
+              No exercises found for &quot;{exerciseSearchQuery}&quot;.
+              {exerciseSearchSuggestions.length > 0 && (
+                <p className="exercise-search-suggestions">
+                  Try: {exerciseSearchSuggestions.map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      className="suggestion-btn"
+                      onClick={() => setExerciseSearchQuery(s)}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </p>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -625,13 +939,14 @@ function App() {
               <>
                 <div className="youtube-video-area">
                   <video
-                    key={youtubeVideoId}
+                    key={referenceExerciseId || referenceVideoUrl}
                     ref={ytVideoRef}
                     src={ytVideoSrc}
                     className="youtube-native-video"
                     playsInline
+                    loop
                     preload="auto"
-                    poster={youtubeVideoId ? `https://img.youtube.com/vi/${youtubeVideoId}/hqdefault.jpg` : undefined}
+                    crossOrigin="anonymous"
                     onPlay={() => setYtPlaying(true)}
                     onPause={() => setYtPlaying(false)}
                     onTimeUpdate={handleYtTimeUpdate}
@@ -643,6 +958,11 @@ function App() {
                       setYtLoading(false);
                       setYtError("Video failed to load. Is the backend running on port 8001?");
                     }}
+                  />
+                  <canvas
+                    ref={ytSkeletonCanvasRef}
+                    className="youtube-skeleton-overlay"
+                    aria-hidden="true"
                   />
                   {ytLoading && (
                     <div className="youtube-loading-overlay">Loading video…</div>
@@ -804,7 +1124,7 @@ function App() {
             ) : (
               <div className="youtube-video-area">
                 <div className="youtube-placeholder-top">
-                  Paste a YouTube link to display the video (backend required)
+                  Search for an exercise above to load the demo video
                 </div>
               </div>
             )}
@@ -812,12 +1132,25 @@ function App() {
         </section>
 
         <section className="panel">
-          <h2>Pose Model Output (WASM)</h2>
+          <h2>Your Pose (Webcam)</h2>
           <div className="video-container output">
             <video ref={videoRef} autoPlay playsInline muted className="video hidden-video" aria-hidden="true" />
             <canvas ref={outputCanvasRef} className="video" />
           </div>
-          <div className="coaching-row">
+          <div className="comparison-display">
+            {comparisonScore != null && comparisonScore >= 0 ? (
+              <div className="comparison-score" style={{ color: scoreToColors(comparisonScore).primary }}>
+                Match: {comparisonScore}%
+              </div>
+            ) : activeTab === "youtube" && ytVideoSrc && (
+              <div className={`comparison-hint ${preprocessError ? "error" : ""}`}>
+                {preprocessLoading
+                  ? "Extracting reference poses…"
+                  : preprocessError
+                    ? preprocessError
+                    : "Play the video and mirror the pose to see your score."}
+              </div>
+            )}
             {coachingFeedback && (
               <div className="coaching-feedback">{coachingFeedback.message}</div>
             )}
@@ -834,43 +1167,6 @@ function App() {
         </section>
       </main>
 
-      <section className="panel preprocess-section">
-        <h2>Preprocess for Supermemory</h2>
-        <p className="preprocess-desc">
-          Extract pose coordinates from the YouTube link above so you can paste them into Supermemory and compare later with your webcam.
-        </p>
-        <div className="preprocess-actions">
-          <button
-            type="button"
-            className="preprocess-btn"
-            onClick={handlePreprocess}
-            disabled={preprocessLoading || !youtubeUrl.trim()}
-          >
-            {preprocessLoading ? "Extracting…" : "Extract pose coordinates"}
-          </button>
-        </div>
-        {preprocessError && (
-          <div className="preprocess-error">{preprocessError}</div>
-        )}
-        {preprocessResult && (
-          <div className="preprocess-output">
-            <textarea
-              readOnly
-              className="preprocess-textarea"
-              value={preprocessResult}
-              spellCheck={false}
-              aria-label="Pose coordinates JSON"
-            />
-            <button
-              type="button"
-              className="copy-btn"
-              onClick={handleCopyPreprocess}
-            >
-              {copyFeedback ? "Copied!" : "Copy for Supermemory"}
-            </button>
-          </div>
-        )}
-      </section>
 
       {(!isModelReady || !isStreaming) && !error && (
         <div className="placeholder" style={{ textAlign: "center", marginTop: "8px" }}>

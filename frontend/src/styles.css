@@ -125,6 +125,14 @@ body {
   display: block;
 }
 
+.youtube-skeleton-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
 .youtube-loading-overlay,
 .youtube-error-overlay {
   position: absolute;
@@ -339,6 +347,27 @@ body {
   display: block;
 }
 
+.comparison-display {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.comparison-score {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.comparison-hint {
+  font-size: 0.9rem;
+  opacity: 0.8;
+}
+
+.comparison-hint.error {
+  color: #ffb3b8;
+}
+
 .video {
   width: 100%;
   height: auto;
@@ -371,6 +400,113 @@ body {
 .youtube-input:focus {
   border-color: rgba(63, 176, 255, 0.5);
   box-shadow: 0 0 0 2px rgba(63, 176, 255, 0.15);
+}
+
+.exercise-search-row {
+  position: relative;
+}
+
+.exercise-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.exercise-search-wrap .youtube-input {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.exercise-search-loading {
+  font-size: 0.9rem;
+  opacity: 0.8;
+}
+
+.exercise-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.exercise-result-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.exercise-result-btn:last-child {
+  border-bottom: none;
+}
+
+.exercise-result-btn:hover:not(:disabled) {
+  background: rgba(63, 176, 255, 0.12);
+}
+
+.exercise-result-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.exercise-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.exercise-meta {
+  font-size: 0.8rem;
+  opacity: 0.7;
+  margin-top: 2px;
+}
+
+.exercise-search-hint {
+  font-size: 0.9rem;
+  opacity: 0.7;
+}
+
+.exercise-search-empty {
+  font-size: 0.9rem;
+  opacity: 0.85;
+  padding: 10px 0;
+}
+
+.exercise-search-suggestions {
+  margin: 8px 0 0;
+  font-size: 0.85rem;
+  opacity: 0.9;
+}
+
+.suggestion-btn {
+  margin: 0 6px 6px 0;
+  padding: 4px 10px;
+  font-size: inherit;
+  font-family: inherit;
+  color: #3fb0ff;
+  background: rgba(63, 176, 255, 0.12);
+  border: 1px solid rgba(63, 176, 255, 0.3);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.suggestion-btn:hover {
+  background: rgba(63, 176, 255, 0.2);
+  border-color: rgba(63, 176, 255, 0.5);
 }
 
 .ai-description-input {

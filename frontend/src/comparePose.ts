@@ -216,15 +216,111 @@ export function comparePose(reference: PoseFrame, live: PoseFrame): CompareResul
 
 const LIMB_FEEDBACK_THRESHOLD = 0.85; // below this = limb is "off"
 
+/** Margin from frame edge (0–1) for visibility. Points outside are considered out of frame. */
+const FRAME_MARGIN = 0.05;
+
+/** Upper-body muscle groups: arms and torso matter, legs don't. */
+const UPPER_MUSCLES = new Set([
+  "chest", "back", "shoulders", "biceps", "triceps", "forearms", "core", "abs",
+  "anterior deltoid", "posterior deltoids", "deltoids", "lats", "middle back",
+  "lower back", "neck", "obliques", "transverse abdominis", "rotator cuff",
+]);
+/** Lower-body muscle groups: legs matter, arms matter less for form. */
+const LOWER_MUSCLES = new Set([
+  "quadriceps", "hamstrings", "glutes", "calves", "abductors", "adductors",
+  "hip flexors", "quads", "legs",
+]);
+
+/** Limb names that are legs (excluded for upper-body exercises). */
+const LEG_LIMBS = new Set(["left_thigh", "right_thigh", "left_shin", "right_shin"]);
+/** Limb names that are arms (excluded for lower-body exercises). */
+const ARM_LIMBS = new Set([
+  "left_upper_arm", "right_upper_arm", "left_forearm", "right_forearm",
+]);
+
+/** Limb name -> [fromIdx, toIdx] for visibility check. */
+const LIMB_INDICES: Record<string, [number, number]> = {
+  left_upper_arm: [LEFT_SHOULDER, LEFT_ELBOW],
+  right_upper_arm: [RIGHT_SHOULDER, RIGHT_ELBOW],
+  left_forearm: [LEFT_ELBOW, LEFT_WRIST],
+  right_forearm: [RIGHT_ELBOW, RIGHT_WRIST],
+  left_thigh: [LEFT_HIP, LEFT_KNEE],
+  right_thigh: [RIGHT_HIP, RIGHT_KNEE],
+  left_shin: [LEFT_KNEE, LEFT_ANKLE],
+  right_shin: [RIGHT_KNEE, RIGHT_ANKLE],
+  left_torso: [LEFT_SHOULDER, LEFT_HIP],
+  right_torso: [RIGHT_SHOULDER, RIGHT_HIP],
+};
+
+function isPointInFrame(p: Vec3): boolean {
+  const x = p[0], y = p[1];
+  return x >= FRAME_MARGIN && x <= 1 - FRAME_MARGIN && y >= FRAME_MARGIN && y <= 1 - FRAME_MARGIN;
+}
+
+/** Returns true if both endpoints of the limb are in frame. Legs often cut off in upper-body framing. */
+function isLimbVisible(landmarks: Vec3[], limbName: string): boolean {
+  if (limbName === "torso") {
+    const hipMid: Vec3 = [
+      (landmarks[LEFT_HIP][0] + landmarks[RIGHT_HIP][0]) / 2,
+      (landmarks[LEFT_HIP][1] + landmarks[RIGHT_HIP][1]) / 2,
+      (landmarks[LEFT_HIP][2] + landmarks[RIGHT_HIP][2]) / 2,
+    ];
+    const shoulderMid: Vec3 = [
+      (landmarks[LEFT_SHOULDER][0] + landmarks[RIGHT_SHOULDER][0]) / 2,
+      (landmarks[LEFT_SHOULDER][1] + landmarks[RIGHT_SHOULDER][1]) / 2,
+      0,
+    ];
+    return isPointInFrame(hipMid) && isPointInFrame(shoulderMid);
+  }
+  const idx = LIMB_INDICES[limbName];
+  if (!idx) return true;
+  return isPointInFrame(landmarks[idx[0]]) && isPointInFrame(landmarks[idx[1]]);
+}
+
+function isLimbRelevantForExercise(limbName: string, exerciseMuscle: string): boolean {
+  if (!exerciseMuscle) return true;
+  const m = exerciseMuscle.toLowerCase();
+  if (UPPER_MUSCLES.has(m) && LEG_LIMBS.has(limbName)) return false;
+  if (LOWER_MUSCLES.has(m) && ARM_LIMBS.has(limbName)) return false;
+  return true;
+}
+
+const FEEDBACK_MESSAGES: Record<string, string[]> = {
+  left_upper_arm: ["Left arm angle is off — match the demo", "Adjust your left arm position", "Bring your left arm in line with the reference"],
+  right_upper_arm: ["Right arm angle is off — match the demo", "Adjust your right arm position", "Bring your right arm in line with the reference"],
+  left_forearm: ["Left forearm needs adjustment", "Align your left forearm with the demo", "Check your left arm position"],
+  right_forearm: ["Right forearm needs adjustment", "Align your right forearm with the demo", "Check your right arm position"],
+  left_thigh: ["Left leg position is off", "Adjust your left leg to match the demo", "Check your left knee alignment"],
+  right_thigh: ["Right leg position is off", "Adjust your right leg to match the demo", "Check your right knee alignment"],
+  left_shin: ["Left lower leg — align with the demo", "Adjust your left leg angle"],
+  right_shin: ["Right lower leg — align with the demo", "Adjust your right leg angle"],
+  left_torso: ["Torso angle needs adjustment", "Straighten or angle your torso to match"],
+  right_torso: ["Torso alignment is off", "Adjust your torso to match the reference"],
+  torso: ["Torso position is off", "Adjust your posture to match the demo", "Straighten your torso"],
+};
+
+function getFeedbackMessage(limbName: string, score: number): string {
+  const messages = FEEDBACK_MESSAGES[limbName] ?? [limbName.replace(/_/g, " ") + " is off"];
+  const idx = Math.min(Math.floor((1 - score) * messages.length), messages.length - 1);
+  return messages[idx];
+}
+
+export interface CompareCoachingOptions {
+  exerciseMuscle?: string;
+}
+
 /**
  * Compare poses with limb-based feedback. Reports which limb is off (lowest similarity).
+ * Only considers limbs that are: (1) in frame, (2) relevant for the exercise (e.g. no legs for upper-body).
  * If landmarks empty: "Limbs not in frame".
  */
 export function comparePoseWithCoaching(
   reference: PoseFrame,
-  live: PoseFrame
+  live: PoseFrame,
+  options?: CompareCoachingOptions
 ): CoachingResult & CompareResult {
   const limbScores: Record<string, number> = {};
+  const exerciseMuscle = (options?.exerciseMuscle || "").trim();
 
   if (
     !reference.landmarks?.length ||
@@ -240,9 +336,14 @@ export function comparePoseWithCoaching(
   }
 
   const { score, limbScores: scores } = scorePoseSimilarity(reference, live);
-  Object.assign(limbScores, scores);
+  const liveNorm = live.landmarks as Vec3[];
 
-  // Find limb with lowest score
+  for (const [limb, s] of Object.entries(scores)) {
+    const visible = isLimbVisible(liveNorm, limb);
+    const relevant = isLimbRelevantForExercise(limb, exerciseMuscle);
+    limbScores[limb] = visible && relevant ? s : 1; // mask out invisible/irrelevant
+  }
+
   let worstLimb: string | null = null;
   let worstScore = 1;
   for (const [limb, s] of Object.entries(limbScores)) {
@@ -256,7 +357,7 @@ export function comparePoseWithCoaching(
     worstLimb != null
       ? {
           joint: worstLimb,
-          message: worstLimb.replace(/_/g, " ") + " is off",
+          message: getFeedbackMessage(worstLimb, worstScore),
         }
       : null;
 

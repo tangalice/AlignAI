@@ -17,9 +17,16 @@ const LIMB_TO_RAW: Record<LimbGroup, string[]> = {
   torso: ["torso"],
 };
 
+export interface PrimaryFeedback {
+  joint: string;
+  message: string;
+}
+
 export interface FrameScoreData {
   score: number;
   limbScores: Record<string, number>;
+  /** From comparePose – single source of truth for what to coach. When set, voice uses this instead of analyzeErrors. */
+  feedback?: PrimaryFeedback | null;
 }
 
 export interface VoiceCoachingOutput {
@@ -29,9 +36,9 @@ export interface VoiceCoachingOutput {
   spoken: boolean;
 }
 
-/** Only speak when error exceeds this. 0.30 = speak when limb score below 70%. Higher = less sensitive. */
-const ERROR_THRESHOLD = 0.30;
-const COOLDOWN_MS = 2500;
+/** Only speak when error exceeds this. 0.35 = speak when limb score below 65%. Higher = less sensitive. */
+const ERROR_THRESHOLD = 0.35;
+const COOLDOWN_MS = 3500;
 
 function mapToGroupScores(limbScores: Record<string, number>): Record<LimbGroup, number> {
   const out = {} as Record<LimbGroup, number>;
@@ -125,12 +132,27 @@ export function preloadVoices(): void {
 // VoiceCoach
 // ---------------------------------------------------------------------------
 
-const MESSAGES: Record<LimbGroup, { soft: string; strong: string }> = {
-  leftArm: { soft: "Adjust left arm.", strong: "Fix your left arm." },
-  rightArm: { soft: "Adjust right arm.", strong: "Fix your right arm." },
-  leftLeg: { soft: "Adjust left leg.", strong: "Fix your left leg." },
-  rightLeg: { soft: "Adjust right leg.", strong: "Fix your right leg." },
-  torso: { soft: "Adjust your torso.", strong: "Fix your torso." },
+const MESSAGES: Record<LimbGroup, { soft: string[]; strong: string[] }> = {
+  leftArm: {
+    soft: ["Left arm — match the demo.", "Adjust your left arm position.", "Bring your left arm in line."],
+    strong: ["Fix your left arm — it's off.", "Your left arm needs correction.", "Align your left arm with the reference."],
+  },
+  rightArm: {
+    soft: ["Right arm — match the demo.", "Adjust your right arm position.", "Bring your right arm in line."],
+    strong: ["Fix your right arm — it's off.", "Your right arm needs correction.", "Align your right arm with the reference."],
+  },
+  leftLeg: {
+    soft: ["Left leg — align with the demo.", "Adjust your left leg position.", "Check your left leg angle."],
+    strong: ["Fix your left leg — it's off.", "Your left leg needs correction.", "Align your left leg with the reference."],
+  },
+  rightLeg: {
+    soft: ["Right leg — align with the demo.", "Adjust your right leg position.", "Check your right leg angle."],
+    strong: ["Fix your right leg — it's off.", "Your right leg needs correction.", "Align your right leg with the reference."],
+  },
+  torso: {
+    soft: ["Torso — adjust to match.", "Straighten your posture.", "Align your torso with the demo."],
+    strong: ["Fix your torso position.", "Your posture is off.", "Adjust your torso to match the reference."],
+  },
 };
 
 export class VoiceCoach {
@@ -165,56 +187,73 @@ export class VoiceCoach {
 
   getMessage(limb: LimbGroup, severity: number): string {
     const m = MESSAGES[limb];
-    return severity > 0.5 ? m.strong : m.soft;
+    const arr = severity > 0.5 ? m.strong : m.soft;
+    const idx = Math.floor(Math.random() * arr.length);
+    return arr[idx];
   }
 }
 
+// Same threshold as AI coach – unified checkpoint
+const COACH_SCORE_THRESHOLD = 0.9;
+
 // ---------------------------------------------------------------------------
 // Engine — processes frames and fires coaching speech
+// Uses comparePose feedback as single source of truth when provided.
 // ---------------------------------------------------------------------------
 
 export function createVoiceCoachingEngine() {
   const voice = new VoiceCoach();
   let lastSpokenAt = 0;
 
-  function processFrame(data: FrameScoreData): VoiceCoachingOutput {
+  function processFrame(data: FrameScoreData, options?: { deferToLlm?: boolean }): VoiceCoachingOutput {
     const ts = performance.now();
-    const error = analyzeErrors(data.score, data.limbScores);
+    const { score, limbScores, feedback } = data;
 
-    if (!error) {
-      return { score: data.score, worstLimb: null, severity: 0, spoken: false };
+    // Unified checkpoint: only coach when feedback exists and score is below threshold
+    const shouldCoach = feedback?.message && score < COACH_SCORE_THRESHOLD;
+    if (!shouldCoach) {
+      return { score, worstLimb: null, severity: 0, spoken: false };
+    }
+
+    // When AI coach will provide the message, don't speak here – caller will invoke speak() when LLM returns
+    if (options?.deferToLlm) {
+      return { score, worstLimb: "torso", severity: 1 - score, spoken: false };
     }
 
     const elapsed = ts - lastSpokenAt;
     if (elapsed < COOLDOWN_MS) {
-      return { score: data.score, worstLimb: error.limb, severity: error.severity, spoken: false };
+      return { score, worstLimb: "torso", severity: 1 - score, spoken: false };
     }
 
-    const msg = voice.getMessage(error.limb, error.severity);
-    voice.speak(msg);
+    voice.speak(feedback.message);
     lastSpokenAt = ts;
-
-    return { score: data.score, worstLimb: error.limb, severity: error.severity, spoken: true };
+    return { score, worstLimb: "torso", severity: 1 - score, spoken: true };
   }
 
   return {
     processFrame,
+    speak: (msg: string) => {
+      voice.speak(msg);
+    },
     cancel: () => voice.cancel(),
-    reset: () => { voice.cancel(); lastSpokenAt = 0; },
+    reset: () => {
+      voice.cancel();
+      lastSpokenAt = 0;
+    },
   };
 }
 
 export function startVoiceCoaching(onFrameScore: (data: FrameScoreData) => void) {
   const engine = createVoiceCoachingEngine();
 
-  function onFrame(data: FrameScoreData): void {
+  function onFrame(data: FrameScoreData, options?: { deferToLlm?: boolean }): void {
     onFrameScore(data);
-    engine.processFrame(data);
+    engine.processFrame(data, options);
   }
 
   return {
     onFrame,
-    processFrame: engine.processFrame,
+    speak: engine.speak,
     cancel: engine.cancel,
     reset: engine.reset,
   };
