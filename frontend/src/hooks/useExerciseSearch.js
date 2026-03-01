@@ -20,7 +20,7 @@ export function useExerciseSearch(apiBase, query, activeTab) {
 
   useEffect(() => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    if (activeTab !== "youtube") return;
+    if (activeTab !== "workout") return;
 
     const q = query.trim();
     const cache = clientCacheRef.current;

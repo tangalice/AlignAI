@@ -1,10 +1,10 @@
 import { test, expect } from "@playwright/test";
 
-test.describe("FormAI app", () => {
+test.describe("AlignAI app", () => {
   test("loads and shows main UI", async ({ page }) => {
     await page.goto("/");
 
-    await expect(page.getByRole("heading", { name: /FormAI Pose Demo/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /AlignAI/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /Exercise Workout/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /AI Generated Video/i })).toBeVisible();
   });

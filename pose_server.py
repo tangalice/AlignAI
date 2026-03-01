@@ -889,16 +889,14 @@ async def workout_summary(request: Request, body: WorkoutSummaryRequest) -> JSON
 - Most frequently flagged areas: {', '.join(w.replace('_', ' ') for w in worst_limbs) if worst_limbs else 'none'}
 - Feedback moments: {'; '.join(unique_feedback[:5]) if unique_feedback else 'none'}"""
 
-    system_prompt = """You are a friendly, encouraging fitness coach. The user just finished a form-check workout session.
-Generate a concise summary (2-3 short paragraphs) that:
-1. Opens with a brief overall assessment — what went well, energy level.
-2. Highlights 1-2 things they did well (be specific, reference the data).
-3. Suggests 1-2 actionable improvements for next time (body part or form cue).
-4. Ends on an encouraging note.
+    system_prompt = """You are a friendly fitness coach. The user just finished a form-check workout.
+Write a very short summary in 3-5 sentences total:
+1. One sentence on overall performance.
+2. One thing they did well (reference the data).
+3. One specific improvement for next time.
+4. One short encouraging close.
 
-Be concise, warm, and specific. Use plain language. No bullet points or headers.
-Do not include any citations, reference numbers, or [1][2][3] style references.
-Use plain text only — no markdown (no ** for bold)."""
+Use plain language only. No bullet points, headers, citations, or [1][2][3]. No markdown (no **)."""
 
     try:
         from openai import AsyncOpenAI
@@ -915,7 +913,7 @@ Use plain text only — no markdown (no ** for bold)."""
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": context},
             ],
-            max_tokens=400,
+            max_tokens=220,
             temperature=0.7,
         )
         summary = ""

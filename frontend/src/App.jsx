@@ -68,10 +68,12 @@ function App() {
   const [workoutSummaryError, setWorkoutSummaryError] = useState(null);
   const [isPastedYoutubeShort, setIsPastedYoutubeShort] = useState(false);
   const [workoutHistory, setWorkoutHistory] = useState(() => loadWorkoutHistory());
+  const [expandedHistoryId, setExpandedHistoryId] = useState(null);
   const [repCount, setRepCount] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
 
-  // Tabs: "youtube" | "ai"
-  const [activeTab, setActiveTab] = useState("youtube");
+  // Tabs: "workout" | "ai"
+  const [activeTab, setActiveTab] = useState("workout");
   const [supermemoryEnabled, setSupermemoryEnabled] = useState(false);
 
   const { results: exerciseResults, suggestions: exerciseSearchSuggestions, loading: exerciseSearchLoading, error: exerciseSearchError } = useExerciseSearch(apiBase, exerciseSearchQuery, activeTab);
@@ -98,6 +100,7 @@ function App() {
   const aiVideoRef = useRef(null);
   const ytProgressIntervalRef = useRef(null);
   const ytSkeletonCanvasRef = useRef(null);
+  const aiTextareaRef = useRef(null);
 
   const ytVideoSrc = referenceVideoUrl || null;
   const isYoutubeVideo = Boolean(
@@ -106,6 +109,13 @@ function App() {
   const youtubeVideoIdFromUrl = referenceVideoUrl?.match(/\/api\/youtube\/([^/?#]+)/)?.[1] ?? null;
 
   const [ttsEnabled, setTtsEnabled] = useState(false);
+
+  useEffect(() => {
+    const el = aiTextareaRef.current;
+    if (!el || el.closest(".search-pill")) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [aiDescription]);
 
   useEffect(() => {
     fetch(`${apiBase}/api/coaching/llm/config`)
@@ -124,7 +134,7 @@ function App() {
 
   // When user pastes a YouTube link in the exercise input, use it as the video source (no iframe; backend streams via redirect).
   useEffect(() => {
-    if (activeTab !== "youtube") return;
+    if (activeTab !== "workout") return;
     const trimmed = exerciseSearchQuery.trim();
     const videoId = getYouTubeVideoId(trimmed);
     if (videoId) {
@@ -152,7 +162,7 @@ function App() {
   const exerciseSearchAbortRef = useRef(null);
   useEffect(() => {
     if (exerciseSearchTimeoutRef.current) clearTimeout(exerciseSearchTimeoutRef.current);
-    if (activeTab !== "youtube") return;
+    if (activeTab !== "workout") return;
     const q = exerciseSearchQuery.trim();
     if (getYouTubeVideoId(q)) return;
     const doSearch = async () => {
@@ -688,10 +698,10 @@ function App() {
   const referenceFramesRef = useRef(null);
   const lastPreprocessedExerciseIdRef = useRef(null);
 
-  // Auto-extract pose coordinates when exercise video loads
+  // Auto-extract pose coordinates when exercise video loads (YouTube or Workout tab)
   useEffect(() => {
     if (
-      activeTab !== "youtube" ||
+      activeTab !== "workout" ||
       !referenceVideoUrl ||
       !referenceExerciseId ||
       !(ytDuration > 0) ||
@@ -756,7 +766,7 @@ function App() {
   }, [isStreaming, isModelReady, apiBase, ttsEnabled]);
 
   useEffect(() => {
-    if (activeTab !== "youtube" && voiceCoachingRef.current) {
+    if (activeTab !== "workout" && voiceCoachingRef.current) {
       voiceCoachingRef.current.reset();
     }
   }, [activeTab]);
@@ -766,6 +776,13 @@ function App() {
       voiceCoachingRef.current.cancel();
     }
   }, [voiceCoachOn]);
+
+  useEffect(() => {
+    if (!workoutActive) return;
+    setElapsed(0);
+    const id = setInterval(() => setElapsed((e) => e + 1), 1000);
+    return () => clearInterval(id);
+  }, [workoutActive]);
 
   const handleStartWorkout = () => {
     workoutSamplesRef.current = [];
@@ -925,8 +942,8 @@ function App() {
         const now = performance.now();
         if (now - lastCompareMsRef.current >= 1000 / 15) {
           lastCompareMsRef.current = now;
-          const refs = activeTab === "youtube" ? referenceFramesRef.current : aiReferenceFramesRef.current;
-          const refVideo = activeTab === "youtube" ? ytVideoRef.current : aiVideoRef.current;
+          const refs = activeTab === "workout" ? referenceFramesRef.current : aiReferenceFramesRef.current;
+          const refVideo = activeTab === "workout" ? ytVideoRef.current : aiVideoRef.current;
           if (
             refs?.length &&
             refVideo &&
@@ -1083,16 +1100,16 @@ function App() {
   }, [isStreaming, isModelReady, activeTab, apiBase, referenceExerciseMuscle, referenceExerciseName]);
 
   useEffect(() => {
-    if (activeTab !== "youtube") {
+    if (activeTab !== "workout") {
       setCoachingFeedback(null);
       setWorkoutSummary(null);
       setWorkoutSummaryError(null);
     }
   }, [activeTab]);
 
-  // Draw skeleton overlay on YouTube video from reference frames
+  // Draw skeleton overlay on reference video from reference frames
   useEffect(() => {
-    if (activeTab !== "youtube") return;
+    if (activeTab !== "workout") return;
 
     let animationFrameId;
 
@@ -1174,153 +1191,167 @@ function App() {
     };
   }, [activeTab]);
 
-  const leftPanelTitle = activeTab === "youtube" ? "Exercise Demo" : "AI Generated Video";
+  const leftPanelTitle = "Reference Video";
+  const hasReference = (activeTab === "workout" && ytVideoSrc) || (activeTab === "ai" && aiVideoUrl);
+
+  const formatTime = (secs) => {
+    const m = String(Math.floor(secs / 60)).padStart(2, "0");
+    const s = String(secs % 60).padStart(2, "0");
+    return `${m}:${s}`;
+  };
+
+  const getScoreLabel = (s) => {
+    if (s >= 90) return "Excellent";
+    if (s >= 80) return "Good Form";
+    if (s >= 60) return "Needs Work";
+    return "Poor Form";
+  };
 
   return (
-    <div className="app">
-      <header className="header">
-        <h1>FormAI Pose Demo</h1>
-        <p>
-          {activeTab === "youtube"
-            ? "Search exercises from the YMove database, then compare your form with the demo video."
-            : "Describe a workout or exercise and generate an AI video to compare with your webcam."}
-        </p>
+    <div className="app-root">
+      {/* ---- Header ---- */}
+      <header className="app-header">
+        <div className="header-brand">
+          <div className="logo-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>
+          </div>
+          <div className="header-titles">
+            <h1>AlignAI</h1>
+            {/* <span className="header-subtitle">Physical Therapy & Workout Form Analysis</span> */}
+          </div>
+        </div>
+        {workoutActive && (
+          <div className="session-badge">
+            <span className="session-dot" />
+            <span>Session Active</span>
+          </div>
+        )}
       </header>
 
-      <div className="tabs">
-        <button
-          type="button"
-          className={`tab ${activeTab === "youtube" ? "tab-active" : ""}`}
-          onClick={() => setActiveTab("youtube")}
-        >
-          Exercise Workout
-        </button>
-        <button
-          type="button"
-          className={`tab ${activeTab === "ai" ? "tab-active" : ""}`}
-          onClick={() => setActiveTab("ai")}
-        >
-          AI Generated Video
-        </button>
-      </div>
-
-      {activeTab === "youtube" && (
-        <div className="input-row exercise-search-row">
-          <label className="input-label" htmlFor="exercise-search">
-            Search exercises or paste a YouTube link
-          </label>
-          <div className="exercise-search-wrap">
-            <input
-              id="exercise-search"
-              type="text"
-              className="youtube-input"
-              placeholder="e.g. Bicycle Crunches, Push-Ups, Squats — or https://youtube.com/watch?v=..."
-              value={exerciseSearchQuery}
-              onChange={(e) => setExerciseSearchQuery(e.target.value)}
-              onFocus={() => setExerciseSearchFocused(true)}
-              onBlur={() => setTimeout(() => setExerciseSearchFocused(false), 150)}
-              disabled={exerciseVideoLoading}
-            />
-            {exerciseVideoLoading && (
-              <span className="exercise-search-loading">Loading video…</span>
+      {/* ---- Search area (fixed-height slot so toggling YouTube/AI doesn’t shift layout) ---- */}
+      <div className="search-area">
+        <div className="search-area-slot">
+          <div className="search-pill-row">
+            {activeTab === "workout" ? (
+              <form className="search-bar search-pill" onSubmit={(e) => e.preventDefault()}>
+                <svg className="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+                <input
+                  type="text"
+                  placeholder="Search workouts... (e.g. Squats, Rotator Cuff PT)"
+                  value={exerciseSearchQuery}
+                  onChange={(e) => setExerciseSearchQuery(e.target.value)}
+                  onFocus={() => setExerciseSearchFocused(true)}
+                  onBlur={() => setTimeout(() => setExerciseSearchFocused(false), 150)}
+                  disabled={exerciseVideoLoading}
+                />
+                {exerciseVideoLoading && <span className="search-loading">Loading…</span>}
+              </form>
+            ) : (
+              <form
+                className="ai-input-wrap search-pill"
+                onSubmit={(e) => { e.preventDefault(); handleGenerateAiVideo(); }}
+              >
+                <textarea
+                  ref={aiTextareaRef}
+                  className="ai-textarea"
+                  placeholder="Describe a workout video (e.g. Person doing jumping jacks, 10 seconds)"
+                  value={aiDescription}
+                  onChange={(e) => setAiDescription(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleGenerateAiVideo(); }
+                  }}
+                  rows={1}
+                  disabled={aiLoading}
+                />
+                <button type="submit" className="ai-send-btn" disabled={aiLoading} aria-label="Generate video">
+                  {aiLoading ? (
+                    <span className="ai-send-spinner" />
+                  ) : (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 2L11 13" /><path d="M22 2L15 22 11 13 2 9 22 2z" /></svg>
+                  )}
+                </button>
+              </form>
             )}
           </div>
-          {exerciseSearchFocused && exerciseResults.length > 0 && (
-            <ul className="exercise-results">
-              {exerciseResults.map((ex) => (
-                <li key={`${ex.name}-${ex.muscle}`}>
-                  <button
-                    type="button"
-                    className="exercise-result-btn"
-                    onClick={() => handleSelectExercise(ex)}
-                    disabled={exerciseVideoLoading}
-                  >
-                    <span className="exercise-name">{ex.name}</span>
-                    <span className="exercise-meta">{ex.muscle} · {ex.level}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          {exerciseSearchFocused && exerciseSearchQuery.trim() && exerciseSearchLoading && exerciseResults.length === 0 && (
-            <div className="exercise-search-hint">Searching…</div>
-          )}
-          {exerciseSearchFocused && exerciseSearchQuery.trim() && !exerciseSearchLoading && exerciseResults.length === 0 && (
-            <div className="exercise-search-empty">
-              No exercises found for &quot;{exerciseSearchQuery}&quot;.
-              {exerciseSearchSuggestions.length > 0 && (
-                <p className="exercise-search-suggestions">
-                  Try: {exerciseSearchSuggestions.map((s) => (
-                    <button
-                      key={s}
-                      type="button"
-                      className="suggestion-btn"
-                      onClick={() => setExerciseSearchQuery(s)}
-                    >
-                      {s}
-                    </button>
-                  ))}
-                </p>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {activeTab === "ai" && (
-        <div className="input-row">
-          <label className="input-label" htmlFor="ai-description">
-            Describe the workout or exercise video
-          </label>
-          <textarea
-            id="ai-description"
-            className="ai-description-input"
-            placeholder="e.g. Person doing jumping jacks in a gym, 10 seconds"
-            value={aiDescription}
-            onChange={(e) => setAiDescription(e.target.value)}
-            rows={3}
-          />
-          <button
-            type="button"
-            className="generate-btn"
-            onClick={handleGenerateAiVideo}
-            disabled={aiLoading}
-          >
-            {aiLoading ? `Generating… ${aiPercent}%` : "Generate Video"}
-          </button>
-          {aiLoading && (
-            <div className="ai-progress">
-              <div className="ai-progress-top">
-                <span className="ai-progress-stage">{aiStage || "working"}</span>
-                <span className="ai-progress-percent">{aiPercent}%</span>
-              </div>
-              <div className="ai-progress-bar">
-                <div className="ai-progress-fill" style={{ width: `${aiPercent}%` }} />
-              </div>
-            </div>
-          )}
-          {aiError && <div className="ai-error">{aiError}</div>}
-        </div>
-      )}
-
-      <main className="side-by-side">
-        <section className="panel">
-          <h2>{leftPanelTitle}</h2>
-          <div className="youtube-video-wrap">
-            {activeTab === "youtube" && ytVideoSrc ? (
+          <div className="search-area-extra">
+            {activeTab === "workout" ? (
               <>
-                <div
-                  className={`youtube-video-area ${isYoutubeVideo && !isPastedYoutubeShort ? "video-area-youtube" : "video-area-preset"}`}
-                >
+                {exerciseSearchFocused && exerciseResults.length > 0 && (
+                  <div className="search-dropdown">
+                    {exerciseResults.map((ex) => (
+                      <button
+                        key={`${ex.name}-${ex.muscle}`}
+                        type="button"
+                        className="search-dropdown-item"
+                        onMouseDown={() => handleSelectExercise(ex)}
+                        disabled={exerciseVideoLoading}
+                      >
+                        <span className="exercise-name">{ex.name}</span>
+                        <span className="exercise-meta">{ex.muscle} · {ex.level}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {exerciseSearchFocused && exerciseSearchQuery.trim() && exerciseSearchLoading && exerciseResults.length === 0 && (
+                  <div className="search-hint">Searching…</div>
+                )}
+                {exerciseSearchFocused && exerciseSearchQuery.trim() && !exerciseSearchLoading && exerciseResults.length === 0 && (
+                  <div className="search-empty">
+                    No exercises found for &quot;{exerciseSearchQuery}&quot;.
+                    {exerciseSearchSuggestions.length > 0 && (
+                      <div className="search-suggestions">
+                        Try: {exerciseSearchSuggestions.map((s) => (
+                          <button key={s} type="button" className="suggestion-pill" onClick={() => setExerciseSearchQuery(s)}>{s}</button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {aiLoading && (
+                  <div className="ai-progress">
+                    <div className="ai-progress-top">
+                      <span>{aiStage || "working"}</span>
+                      <span>{aiPercent}%</span>
+                    </div>
+                    <div className="ai-progress-bar"><div className="ai-progress-fill" style={{ width: `${aiPercent}%` }} /></div>
+                  </div>
+                )}
+                {aiError && <div className="ai-error">{aiError}</div>}
+              </>
+            )}
+          </div>
+        </div>
+        <div className="source-pills-row">
+          <button type="button" className={`source-pill ${activeTab === "workout" ? "active" : ""}`} onClick={() => setActiveTab("workout")}>
+            <span className="pill-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="6" /><circle cx="12" cy="12" r="2" /></svg></span> Workout
+          </button>
+          <button type="button" className={`source-pill ${activeTab === "ai" ? "active" : ""}`} onClick={() => setActiveTab("ai")}>
+            <span className="pill-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" /></svg></span> AI Generated
+          </button>
+        </div>
+      </div>
+
+      {/* ---- Main video area ---- */}
+      <main className="video-area">
+        <div className="video-grid">
+          {/* Reference video card */}
+          <div className="video-card">
+            <div className="video-card-label">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" /><path d="m8 21 4-4 4 4" /></svg>
+              <span>{leftPanelTitle}</span>
+            </div>
+            <div className="video-card-inner">
+              {activeTab === "workout" && ytVideoSrc ? (
+                <div className={`ref-video-area ${isYoutubeVideo && !isPastedYoutubeShort ? "landscape" : "portrait"}`}>
                   <video
                     key={referenceExerciseId || referenceVideoUrl}
                     ref={ytVideoRef}
                     src={ytVideoSrc}
-                    className="youtube-native-video"
-                    playsInline
-                    loop
-                    preload="auto"
-                    crossOrigin="anonymous"
+                    className="ref-video"
+                    playsInline loop preload="auto" crossOrigin="anonymous"
                     poster={youtubeVideoIdFromUrl ? `https://img.youtube.com/vi/${youtubeVideoIdFromUrl}/hqdefault.jpg` : undefined}
                     onPlay={() => setYtPlaying(true)}
                     onPause={() => setYtPlaying(false)}
@@ -1329,315 +1360,265 @@ function App() {
                     onEnded={() => setYtProgress(0)}
                     onLoadStart={() => { setYtLoading(true); setYtError(null); }}
                     onCanPlay={() => setYtLoading(false)}
-                    onError={() => {
-                      setYtLoading(false);
-                      setYtError("Video failed to load. Is the backend running?");
-                    }}
+                    onError={() => { setYtLoading(false); setYtError("Video failed to load. Is the backend running?"); }}
                   />
-                  <canvas
-                    ref={ytSkeletonCanvasRef}
-                    className="youtube-skeleton-overlay"
-                    aria-hidden="true"
-                  />
-                  {ytLoading && (
-                    <div className="youtube-loading-overlay">Loading video…</div>
-                  )}
-                  {ytError && (
-                    <div className="youtube-error-overlay">{ytError}</div>
-                  )}
+                  <canvas ref={ytSkeletonCanvasRef} className="skeleton-overlay" aria-hidden="true" />
+                  {ytLoading && <div className="video-loading-overlay">Loading video…</div>}
+                  {ytError && <div className="video-error-overlay">{ytError}</div>}
                 </div>
-                <div className="player-controls">
-                  <button
-                    type="button"
-                    className="control-btn play-pause"
-                    onClick={handleYtPlayPause}
-                    aria-label={ytPlaying ? "Pause" : "Play"}
-                  >
-                    {ytPlaying ? (
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                        <rect x="6" y="4" width="4" height="16" rx="1" />
-                        <rect x="14" y="4" width="4" height="16" rx="1" />
-                      </svg>
-                    ) : (
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                        <path d="M8 5v14l11-7z" />
-                      </svg>
-                    )}
-                  </button>
-                  <div className="progress-wrap">
-                    <input
-                      type="range"
-                      className="progress-range"
-                      min="0"
-                      max="100"
-                      step="0.1"
-                      value={ytProgress}
-                      onInput={handleYtSeek}
-                      aria-label="Seek"
-                    />
-                  </div>
-                  <div className="volume-wrap">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                      <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71V20.77c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
-                    </svg>
-                    <input
-                      type="range"
-                      className="volume-range"
-                      min="0"
-                      max="100"
-                      value={ytVolume}
-                      onInput={handleYtVolume}
-                      aria-label="Volume"
-                    />
-                  </div>
-                  <div className="speed-wrap">
-                    <span className="speed-label" title="Playback speed">Speed</span>
-                    <input
-                      type="range"
-                      className="speed-range"
-                      min="0.25"
-                      max="2"
-                      step="0.25"
-                      value={ytSpeed}
-                      onInput={handleYtSpeed}
-                      aria-label="Playback speed"
-                    />
-                    <span className="speed-value">{ytSpeed}x</span>
-                  </div>
-                </div>
-              </>
-            ) : activeTab === "ai" && (aiLoading || aiVideoUrl) ? (
-              <>
-                <div className="youtube-video-area">
+              ) : activeTab === "ai" && (aiLoading || aiVideoUrl) ? (
+                <div className="ref-video-area landscape">
                   {aiLoading ? (
-                    <div className="youtube-loading-overlay">
-                      Generating video… This may take a few minutes.
-                    </div>
+                    <div className="video-loading-overlay">Generating video… This may take a few minutes.</div>
                   ) : aiVideoUrl ? (
-                    <video
-                      ref={aiVideoRef}
-                      src={aiVideoUrl}
-                      className="youtube-native-video"
-                      playsInline
-                      preload="auto"
-                      onPlay={() => setAiPlaying(true)}
-                      onPause={() => setAiPlaying(false)}
+                    <video ref={aiVideoRef} src={aiVideoUrl} className="ref-video" playsInline preload="auto"
+                      onPlay={() => setAiPlaying(true)} onPause={() => setAiPlaying(false)}
                       onTimeUpdate={handleAiTimeUpdate}
                       onLoadedMetadata={(e) => setAiDuration(e.target.duration ?? 0)}
                       onEnded={() => setAiProgress(0)}
                     />
                   ) : null}
                 </div>
-                {aiVideoUrl && (
-                  <div className="player-controls">
-                    <button
-                      type="button"
-                      className="control-btn play-pause"
-                      onClick={handleAiPlayPause}
-                      aria-label={aiPlaying ? "Pause" : "Play"}
-                    >
-                      {aiPlaying ? (
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                          <rect x="6" y="4" width="4" height="16" rx="1" />
-                          <rect x="14" y="4" width="4" height="16" rx="1" />
-                        </svg>
-                      ) : (
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                          <path d="M8 5v14l11-7z" />
-                        </svg>
+              ) : (
+                <div className="video-empty">
+                  {activeTab === "workout"
+                    ? "Search for a workout to load reference"
+                    : "Enter a description above to generate"}
+                </div>
+              )}
+            </div>
+            {/* Player controls for reference video */}
+            {activeTab === "workout" && ytVideoSrc && (
+              <div className="player-controls">
+                <button type="button" className="ctrl-btn" onClick={handleYtPlayPause} aria-label={ytPlaying ? "Pause" : "Play"}>
+                  {ytPlaying ? (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>
+                  ) : (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+                  )}
+                </button>
+                <div className="ctrl-progress"><input type="range" min="0" max="100" step="0.1" value={ytProgress} onInput={handleYtSeek} aria-label="Seek" /></div>
+                <div className="ctrl-volume">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" /></svg>
+                  <input type="range" min="0" max="100" value={ytVolume} onInput={handleYtVolume} aria-label="Volume" />
+                </div>
+                <div className="ctrl-speed">
+                  <span>Speed</span>
+                  <input type="range" min="0.25" max="2" step="0.25" value={ytSpeed} onInput={handleYtSpeed} aria-label="Speed" />
+                  <span>{ytSpeed}x</span>
+                </div>
+              </div>
+            )}
+            {/* Player controls for AI video */}
+            {activeTab === "ai" && aiVideoUrl && (
+              <div className="player-controls">
+                <button type="button" className="ctrl-btn" onClick={handleAiPlayPause} aria-label={aiPlaying ? "Pause" : "Play"}>
+                  {aiPlaying ? (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>
+                  ) : (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+                  )}
+                </button>
+                <div className="ctrl-progress"><input type="range" min="0" max="100" step="0.1" value={aiProgress} onInput={handleAiSeek} aria-label="Seek" /></div>
+                <div className="ctrl-volume">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" /></svg>
+                  <input type="range" min="0" max="100" value={aiVolume} onInput={handleAiVolume} aria-label="Volume" />
+                </div>
+                <div className="ctrl-speed">
+                  <span>Speed</span>
+                  <input type="range" min="0.25" max="2" step="0.25" value={aiSpeed} onInput={handleAiSpeed} aria-label="Speed" />
+                  <span>{aiSpeed}x</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Camera card */}
+          <div className="video-card camera-card">
+            <div className="video-card-label">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" /><circle cx="12" cy="13" r="3" /></svg>
+              <span>Your Camera</span>
+            </div>
+            <div className="video-card-inner camera-inner">
+              <video ref={videoRef} autoPlay playsInline muted className="hidden-video" aria-hidden="true" />
+              <canvas ref={outputCanvasRef} className="camera-canvas" />
+              {(!isModelReady || !isStreaming) && !error && (
+                <div className="video-empty">
+                  {!hasReference ? "Waiting for workout selection" : !isStreaming ? "Waiting for webcam…" : "Loading pose model…"}
+                </div>
+              )}
+              {error && <div className="video-error-overlay">{error}</div>}
+            </div>
+            {/* Score overlay */}
+            {comparisonScore != null && comparisonScore >= 0 && (
+              <div className="score-overlay">
+                <div className="score-ring-wrap">
+                  <svg className="score-ring-svg" viewBox="0 0 100 100">
+                    <circle cx="50" cy="50" r="40" stroke="hsl(220, 15%, 25%)" strokeWidth="6" fill="none" />
+                    <circle cx="50" cy="50" r="40"
+                      stroke={scoreToColors(comparisonScore).primary}
+                      strokeWidth="6" fill="none" strokeLinecap="round"
+                      strokeDasharray={2 * Math.PI * 40}
+                      strokeDashoffset={2 * Math.PI * 40 - (comparisonScore / 100) * 2 * Math.PI * 40}
+                      style={{ filter: `drop-shadow(0 0 8px ${scoreToColors(comparisonScore).primary})`, transition: "stroke-dashoffset 0.5s ease-out" }}
+                    />
+                  </svg>
+                  <span className="score-ring-text">{comparisonScore}%</span>
+                </div>
+                <div className="score-label-wrap">
+                  <span className="score-label-sub">Form Score</span>
+                  <span className="score-label-main">{getScoreLabel(comparisonScore)}</span>
+                </div>
+                {workoutActive && repCount > 0 && (
+                  <div className="score-reps">{repCount} reps</div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Status row */}
+        <div className="status-row">
+          {activeTab === "workout" && ytVideoSrc && comparisonScore == null && (
+            <span className={`status-hint ${preprocessError ? "error" : ""}`}>
+              {preprocessLoading ? "Extracting reference poses…" : preprocessError ? preprocessError : "Play the video and mirror the pose to see your score."}
+            </span>
+          )}
+          {activeTab === "ai" && aiVideoUrl && (
+            <span className={`status-hint ${aiPreprocessError ? "error" : ""}`}>
+              {aiPreprocessLoading ? "Extracting reference poses…" : aiPreprocessError ? aiPreprocessError : aiPreprocessReady ? "Play the video and mirror the pose." : "Extracting reference poses…"}
+            </span>
+          )}
+          {coachingFeedback && (
+            <div className="coaching-badge">{coachingFeedback.message}</div>
+          )}
+          <label className="voice-toggle">
+            <input type="checkbox" checked={voiceCoachOn} onChange={(e) => setVoiceCoachOn(e.target.checked)} aria-label="Toggle voice coaching" />
+            <span>Voice coach{supermemoryEnabled ? " · guides" : ""}{ttsEnabled ? " · TTS" : ""}</span>
+          </label>
+        </div>
+
+        {/* Workout history */}
+        {workoutHistory.length > 0 && (
+          <div className="history-section">
+            <h3>Workout History</h3>
+            <div className="history-list">
+              {workoutHistory.slice(0, 10).map((entry) => (
+                <div key={entry.id} className="history-item-wrap">
+                  <button
+                    type="button"
+                    className="history-item"
+                    onClick={() => setExpandedHistoryId((id) => (id === entry.id ? null : entry.id))}
+                  >
+                    <span className="history-date">{new Date(entry.date).toLocaleDateString()}</span>
+                    <span className="history-exercise">{entry.exercise}</span>
+                    {entry.reps > 0 && <span className="history-reps">{entry.reps} reps</span>}
+                    {(entry.summary || entry.durationSec) && (
+                      <span className="history-toggle">{expandedHistoryId === entry.id ? "Hide" : "Summary"}</span>
+                    )}
+                  </button>
+                  {expandedHistoryId === entry.id && (entry.summary || entry.durationSec != null) && (
+                    <div className="history-detail">
+                      {entry.durationSec != null && entry.durationSec > 0 && (
+                        <div className="history-meta">Duration: {Math.floor(entry.durationSec / 60)}m {entry.durationSec % 60}s</div>
                       )}
-                    </button>
-                    <div className="progress-wrap">
-                      <input
-                        type="range"
-                        className="progress-range"
-                        min="0"
-                        max="100"
-                        step="0.1"
-                        value={aiProgress}
-                        onInput={handleAiSeek}
-                        aria-label="Seek"
-                      />
+                      {entry.summary ? (
+                        <div
+                          className="history-summary-text"
+                          dangerouslySetInnerHTML={{
+                            __html: entry.summary
+                              .replace(/\s*\[\d+\]\s*/g, " ")
+                              .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                              .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+                              .replace(/\n/g, "<br />"),
+                          }}
+                        />
+                      ) : (
+                        <div className="history-summary-text history-no-summary">No summary saved.</div>
+                      )}
                     </div>
-                    <div className="volume-wrap">
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                        <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71V20.77c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
-                      </svg>
-                      <input
-                        type="range"
-                        className="volume-range"
-                        min="0"
-                        max="100"
-                        value={aiVolume}
-                        onInput={handleAiVolume}
-                        aria-label="Volume"
-                      />
-                    </div>
-                    <div className="speed-wrap">
-                      <span className="speed-label" title="Playback speed">Speed</span>
-                      <input
-                        type="range"
-                        className="speed-range"
-                        min="0.25"
-                        max="2"
-                        step="0.25"
-                        value={aiSpeed}
-                        onInput={handleAiSpeed}
-                        aria-label="Playback speed"
-                      />
-                      <span className="speed-value">{aiSpeed}x</span>
-                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <button type="button" className="history-clear-btn" onClick={() => { clearWorkoutHistory(); setWorkoutHistory([]); }}>Clear history</button>
+          </div>
+        )}
+      </main>
+
+      {/* ---- Floating action dock ---- */}
+      {(activeTab === "workout" && ytVideoSrc) || (activeTab === "ai" && aiVideoUrl) ? (
+        <div className="dock-anchor">
+          <div className="action-dock">
+            <div className="dock-timer">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
+              <span className="dock-timer-text">{formatTime(elapsed)}</span>
+            </div>
+            <button
+              type="button"
+              className={`dock-main-btn ${workoutActive ? "active" : ""}`}
+              onClick={workoutActive ? handleEndWorkout : handleStartWorkout}
+              disabled={workoutSummaryLoading}
+            >
+              {workoutActive ? (
+                workoutSummaryLoading ? "Generating…" : <><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="12" height="16" rx="1" /></svg> Stop Workout</>
+              ) : (
+                <><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg> Start Workout</>
+              )}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ---- Summary modal ---- */}
+      {(workoutSummary || workoutSummaryLoading || workoutSummaryError) && (
+        <div className="summary-backdrop" onClick={() => { if (!workoutSummaryLoading) { setWorkoutSummary(null); setWorkoutSummaryError(null); } }}>
+          <div className="summary-modal" onClick={(e) => e.stopPropagation()}>
+            <button type="button" className="summary-close" onClick={() => { setWorkoutSummary(null); setWorkoutSummaryError(null); }}>×</button>
+            <div className="summary-header">
+              <div className="summary-icon">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></svg>
+              </div>
+              <h2>Workout complete</h2>
+              <p>Summary</p>
+            </div>
+            {workoutSummaryLoading && <div className="summary-loading">Generating summary…</div>}
+            {workoutSummary && !workoutSummaryLoading && (
+              <div className="summary-body">
+                {(repCount > 0 || elapsed > 0) && (
+                  <div className="summary-stats">
+                    <div className="summary-stat"><span className="stat-value">{formatTime(elapsed)}</span><span className="stat-label">Duration</span></div>
+                    {repCount > 0 && <div className="summary-stat"><span className="stat-value">{repCount}</span><span className="stat-label">Reps</span></div>}
                   </div>
                 )}
-              </>
-            ) : activeTab === "ai" ? (
-              <div className="youtube-video-area">
-                <div className="youtube-placeholder-top">
-                  Enter a description and click Generate Video (Modal.com backend required)
-                </div>
-              </div>
-            ) : (
-              <div className="youtube-video-area video-area-preset">
-                <div className="youtube-placeholder-top">
-                  Search for an exercise or paste a YouTube link to load the demo video
-                </div>
-              </div>
-            )}
-          </div>
-        </section>
-
-        <section className="panel">
-          <h2>Your Pose (Webcam)</h2>
-          <div className="video-container output">
-            <video ref={videoRef} autoPlay playsInline muted className="video hidden-video" aria-hidden="true" />
-            <canvas ref={outputCanvasRef} className="video" />
-          </div>
-          <div className="comparison-display">
-            {comparisonScore != null && comparisonScore >= 0 ? (
-              <div className="comparison-score-row">
-                <span className="comparison-score" style={{ color: scoreToColors(comparisonScore).primary }}>
-                  Match: {comparisonScore}%
-                </span>
-                {workoutActive && (
-                  <span className="rep-count">Reps: {repCount}</span>
-                )}
-              </div>
-            ) : activeTab === "youtube" && ytVideoSrc && (
-              <div className={`comparison-hint ${preprocessError ? "error" : ""}`}>
-                {preprocessLoading
-                  ? "Extracting reference poses…"
-                  : preprocessError
-                    ? preprocessError
-                    : "Play the video and mirror the pose to see your score."}
-              </div>
-            )}
-            {activeTab === "ai" && aiVideoUrl && (
-              <div className={`comparison-hint ${aiPreprocessError ? "error" : ""}`}>
-                {aiPreprocessLoading
-                  ? "Extracting reference poses…"
-                  : aiPreprocessError
-                    ? aiPreprocessError
-                    : aiPreprocessReady
-                      ? "Play the video and mirror the pose to see your score."
-                      : "Extracting reference poses…"}
-              </div>
-            )}
-            {coachingFeedback && (
-              <div className="coaching-feedback">{coachingFeedback.message}</div>
-            )}
-            <label className="voice-coach-toggle">
-              <input
-                type="checkbox"
-                checked={voiceCoachOn}
-                onChange={(e) => setVoiceCoachOn(e.target.checked)}
-                aria-label="Toggle voice coaching"
-              />
-              <span>Voice coach{supermemoryEnabled ? " (with form guides)" : ""}{ttsEnabled ? " · ElevenLabs" : ""}</span>
-            </label>
-            {activeTab === "youtube" && ytVideoSrc && (
-              <div className="workout-actions">
-                {!workoutActive ? (
-                  <button type="button" className="btn-workout btn-start" onClick={handleStartWorkout}>
-                    Start workout
-                  </button>
-                ) : (
-                  <button type="button" className="btn-workout btn-end" onClick={handleEndWorkout} disabled={workoutSummaryLoading}>
-                    {workoutSummaryLoading ? "Generating summary…" : "End workout"}
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        </section>
-
-        {(workoutSummary || workoutSummaryError || workoutSummaryLoading) && (
-          <section className="panel workout-summary-panel">
-            <h2>Workout summary</h2>
-            {workoutSummaryLoading && <div className="workout-summary-loading">Generating your AI summary…</div>}
-            {workoutSummary && !workoutSummaryLoading && (
-              <>
                 <div
-                  className="workout-summary-content"
+                  className="summary-text"
                   dangerouslySetInnerHTML={{
                     __html: (() => {
                       const t = workoutSummary
                         .replace(/\s*\[\d+\]\s*/g, " ")
-                        .replace(/&/g, "&amp;")
-                        .replace(/</g, "&lt;")
-                        .replace(/>/g, "&gt;")
+                        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
                         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
                       return t.replace(/\n/g, "<br />");
                     })(),
                   }}
                 />
-                {repCount > 0 && <div className="workout-reps">Reps completed: {repCount}</div>}
-              </>
-            )}
-            {workoutSummaryError && !workoutSummaryLoading && (
-              <div className="workout-summary-error">
-                {workoutSummaryError}
-                <button type="button" className="btn-retry" onClick={handleRetrySummary}>Retry</button>
               </div>
             )}
-          </section>
-        )}
-
-        {workoutHistory.length > 0 && activeTab === "youtube" && (
-          <section className="panel workout-history-panel">
-            <h2>Workout history</h2>
-            <ul className="workout-history-list">
-              {workoutHistory.slice(0, 10).map((entry) => (
-                <li key={entry.id} className="workout-history-item">
-                  <span className="workout-history-date">{new Date(entry.date).toLocaleDateString()}</span>
-                  <span className="workout-history-exercise">{entry.exercise}</span>
-                  {entry.reps > 0 && <span className="workout-history-reps">{entry.reps} reps</span>}
-                </li>
-              ))}
-            </ul>
-            <button type="button" className="btn-clear-history" onClick={() => { clearWorkoutHistory(); setWorkoutHistory([]); }}>
-              Clear history
-            </button>
-          </section>
-        )}
-      </main>
-
-
-      {(!isModelReady || !isStreaming) && !error && (
-        <div className="placeholder" style={{ textAlign: "center", marginTop: "8px" }}>
-          {!isStreaming
-            ? "Waiting for webcam permissions…"
-            : "Loading pose model (WASM)…"}
-        </div>
-      )}
-
-      {error && (
-        <div className="error-banner">
-          <span>{error}</span>
+            {workoutSummaryError && !workoutSummaryLoading && (
+              <div className="summary-error">
+                {workoutSummaryError}
+                <button type="button" className="summary-retry-btn" onClick={handleRetrySummary}>Retry</button>
+              </div>
+            )}
+            {workoutSummary && !workoutSummaryLoading && (
+              <button type="button" className="summary-done-btn" onClick={() => setWorkoutSummary(null)}>Done</button>
+            )}
+          </div>
         </div>
       )}
 
       <Toast message={toast} onDismiss={() => setToast(null)} type="error" />
-
       <CoachPanel apiBase={apiBase} />
     </div>
   );
