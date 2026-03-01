@@ -460,6 +460,8 @@ class LLMCoachingRequest(BaseModel):
     exercise_name: Optional[str] = None
     exercise_muscle: Optional[str] = None
     temporal_trend: Optional[str] = None  # "improving" | "worsening" | null
+    user_id: Optional[str] = None
+    user_email: Optional[str] = None  # Used as Supermemory user identifier when set
 
 
 class SupermemoryAddExerciseRequest(BaseModel):
@@ -483,16 +485,19 @@ class WorkoutSummaryRequest(BaseModel):
     reps: Optional[int] = None
     samples: list[WorkoutSample] = []
     user_id: str = "default"
+    user_email: Optional[str] = None  # Used as Supermemory user identifier when set
 
 
 class CoachChatRequest(BaseModel):
     message: str
     user_id: str = "default"
+    user_email: Optional[str] = None  # Used as Supermemory user identifier when set
 
 
 class CoachPTReportRequest(BaseModel):
     reason: str  # "progress_declining" | "low_form_score" | "user_requested"
     user_id: str = "default"
+    user_email: Optional[str] = None  # Used as Supermemory user identifier when set
 
 
 class SendPTReportRequest(BaseModel):
@@ -722,17 +727,27 @@ SUPERMEMORY_CONTAINER = "formai_exercises"
 SUPERMEMORY_USER_CONTAINER = "formai_user"
 
 
-async def _supermemory_add_user(content: str, custom_id: str) -> bool:
-    """Add user-specific content to Supermemory for personalized coaching."""
+def _sm_user_tag(user_id: str, user_email: Optional[str] = None) -> str:
+    """Return a Supermemory-safe container tag for per-user partitioning. Prefer email when set."""
+    raw = (user_email or user_id or "default").strip()
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", raw).strip("_")[:80] or "default"
+    return f"formai_user_{safe}"
+
+
+async def _supermemory_add_user(
+    content: str, custom_id: str, user_id: str = "default", user_email: Optional[str] = None
+) -> bool:
+    """Add user-specific content to Supermemory. Uses per-user container tag so it shows in Supermemory dashboard."""
     if not SUPERMEMORY_API_KEY:
         return False
     try:
         from supermemory import AsyncSupermemory
 
+        user_tag = _sm_user_tag(user_id, user_email)
         client = AsyncSupermemory(api_key=SUPERMEMORY_API_KEY)
         await client.add(
             content=content,
-            container_tags=[SUPERMEMORY_USER_CONTAINER],
+            container_tags=[user_tag],
             custom_id=custom_id,
         )
         return True
@@ -742,9 +757,9 @@ async def _supermemory_add_user(content: str, custom_id: str) -> bool:
 
 
 async def _supermemory_search(
-    q: str, limit: int = 5, include_user: bool = True
+    q: str, limit: int = 5, include_user: bool = True, user_id: str = "default", user_email: Optional[str] = None
 ) -> list[str]:
-    """Search Supermemory for form cues and optionally user context. Returns relevant text chunks."""
+    """Search Supermemory for form cues and optionally user context. When user_id/user_email given, only returns that user's memories."""
     if not SUPERMEMORY_API_KEY:
         return []
     try:
@@ -763,9 +778,10 @@ async def _supermemory_search(
             if text and isinstance(text, str):
                 chunks.append(text.strip())
         if include_user:
+            user_tag = _sm_user_tag(user_id, user_email)
             results_user = await client.search.documents(
                 q=q,
-                container_tags=[SUPERMEMORY_USER_CONTAINER],
+                container_tags=[user_tag],
                 limit=per_container,
             )
             for r in results_user.results:
@@ -874,7 +890,10 @@ async def llm_coaching(request: Request, body: LLMCoachingRequest) -> JSONRespon
     rag_context = ""
     if body.exercise_name or body.worst_limb:
         search_q = f"{body.exercise_name or 'exercise'} form cues {body.worst_limb or ''}".strip()
-        chunks = await _supermemory_search(search_q, limit=5, include_user=True)
+        chunks = await _supermemory_search(
+            search_q, limit=5, include_user=True,
+            user_id=body.user_id or "default", user_email=body.user_email
+        )
         if chunks:
             rag_context = "\n\nContext (form guides + user's past sessions):\n" + "\n".join(f"- {c}" for c in chunks)
 
@@ -1014,7 +1033,9 @@ Duration: {body.duration_sec or 0:.0f}s"""
                 memory_content += f"\nFeedback received during workout: {'; '.join(unique_feedback[:5])}"
             safe_uid = re.sub(r"[^a-zA-Z0-9_-]", "_", user_id)[:30]
             custom_id = f"workout_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{(body.exercise_name or 'unknown').lower().replace(' ', '_')[:20]}_{safe_uid}"
-            ok = await _supermemory_add_user(memory_content, custom_id)
+            ok = await _supermemory_add_user(
+                memory_content, custom_id, user_id=user_id, user_email=body.user_email
+            )
             if ok:
                 print(f"[supermemory] saved workout to user context: {custom_id}")
 
@@ -1082,7 +1103,13 @@ async def coach_chat(request: Request, body: CoachChatRequest) -> JSONResponse:
     async def _do_chat():
         search_q = f"{msg} user workout history progress form"
         try:
-            chunks = await asyncio.wait_for(_supermemory_search(search_q, limit=6, include_user=True), timeout=8.0)
+            chunks = await asyncio.wait_for(
+                _supermemory_search(
+                    search_q, limit=6, include_user=True,
+                    user_id=body.user_id, user_email=body.user_email
+                ),
+                timeout=8.0,
+            )
         except asyncio.TimeoutError:
             print("[coach-chat] supermemory search timed out, using no context")
             chunks = []
@@ -1190,7 +1217,10 @@ async def coach_pt_report(request: Request, body: CoachPTReportRequest) -> JSONR
         entries = get_progress(body.user_id, limit=30)
 
         search_q = "workout summary form feedback areas to work on"
-        chunks = await _supermemory_search(search_q, limit=8, include_user=True)
+        chunks = await _supermemory_search(
+            search_q, limit=8, include_user=True,
+            user_id=body.user_id, user_email=body.user_email
+        )
         rag = "\n---\n".join(chunks) if chunks else "No additional context."
 
         report_context = f"""Output a fitness data summary document. This is a template the user will share with their physical therapist.
@@ -1277,7 +1307,9 @@ async def save_user_profile(body: UserProfileRequest) -> JSONResponse:
     if len(content) < 30:
         return JSONResponse(content={"ok": True})
     custom_id = f"profile_{re.sub(r'[^a-zA-Z0-9_-]', '_', user_id)}"
-    ok = await _supermemory_add_user(content, custom_id)
+    ok = await _supermemory_add_user(
+        content, custom_id, user_id=user_id, user_email=body.user_email
+    )
     return JSONResponse(content={"ok": ok})
 
 

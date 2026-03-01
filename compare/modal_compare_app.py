@@ -21,6 +21,7 @@ from typing import Optional
 
 import modal
 from fastapi.responses import JSONResponse
+from starlette.requests import Request
 
 app = modal.App("formai-compare")
 
@@ -180,7 +181,7 @@ def _run_pose_preprocess(cap, sample_fps: float) -> list:
     gpu="T4",  # Optional: comment out for CPU-only (MediaPipe fallback)
 )
 @modal.web_endpoint(method="POST")
-async def compare_full(request):
+async def compare_full(request: Request):
     """
     POST with JSON: { "youtube_url": "...", "user": {...}, "exercise": "", "sample_fps": 8.0 }
     or { "reference": {...}, "user": {...}, "exercise": "" }.
@@ -285,7 +286,7 @@ def _open_video_from_payload(body: dict):
     gpu="T4",
 )
 @modal.web_endpoint(method="POST")
-async def preprocess(request):
+async def preprocess(request: Request):
     """
     POST with JSON: { "youtube_url": "..." } or { "video_url": "..." } or { "video_base64": "..." }.
     Returns { "frames": [...] } with pose landmarks. Use for form extraction from any video.

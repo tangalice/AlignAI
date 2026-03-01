@@ -13,6 +13,8 @@ import { getUserId, loadProfile } from "../hooks/useUserProfile";
 export function CoachPanel({ apiBase: apiBaseProp, onOpenSettings }) {
   const apiBase = apiBaseProp ?? import.meta.env.VITE_API_BASE ?? "";
   const userId = getUserId();
+  const profile = loadProfile();
+  const userEmail = profile.userEmail?.trim() || undefined;
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState("chat");
   const [messages, setMessages] = useState([
@@ -63,7 +65,7 @@ export function CoachPanel({ apiBase: apiBaseProp, onOpenSettings }) {
       const res = await fetch(`${apiBase}/api/coach/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, user_id: userId }),
+        body: JSON.stringify({ message: text, user_id: userId, user_email: userEmail }),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
@@ -102,7 +104,7 @@ export function CoachPanel({ apiBase: apiBaseProp, onOpenSettings }) {
       const res = await fetch(`${apiBase}/api/coach/pt-report`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reason: progress.alert || "user_requested", user_id: userId }),
+        body: JSON.stringify({ reason: progress.alert || "user_requested", user_id: userId, user_email: userEmail }),
       });
       let data = {};
       try {

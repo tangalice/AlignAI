@@ -349,7 +349,8 @@ function App() {
 
   // Extract poses from AI-generated video via Modal (fast) when video is ready
   useEffect(() => {
-    if (!aiVideoUrl || !aiVideoBlobRef.current || aiPreprocessLoading) return;
+    if (!aiVideoUrl || !aiVideoBlobRef.current) return;
+    const controller = new AbortController();
     const blob = aiVideoBlobRef.current;
     setAiPreprocessLoading(true);
     setAiPreprocessError(null);
@@ -358,6 +359,7 @@ function App() {
     fetch(`${apiBase}/api/preprocess/video?sample_fps=8`, {
       method: "POST",
       body: formData,
+      signal: controller.signal,
     })
       .then(async (r) => {
         const data = await r.json();
@@ -366,11 +368,14 @@ function App() {
         setAiPreprocessReady(Boolean(data.frames?.length));
       })
       .catch((err) => {
+        if (err.name === "AbortError") return;
         setAiPreprocessError(err.message || "Could not extract poses");
         setAiPreprocessReady(false);
         aiReferenceFramesRef.current = null;
       })
       .finally(() => setAiPreprocessLoading(false));
+
+    return () => controller.abort();
   }, [aiVideoUrl, apiBase]);
 
   // Sync playback rate and volume when video element or state changes
@@ -856,6 +861,7 @@ function App() {
           duration_sec: durationSec,
           reps: repCountRef.current || undefined,
           user_id: getUserId(),
+          user_email: profile?.userEmail?.trim() || undefined,
           samples: samples.map((s) => ({
             video_t: s.video_t,
             score: s.score,
@@ -901,6 +907,7 @@ function App() {
           duration_sec: durationSec,
           reps: repCountRef.current || undefined,
           user_id: getUserId(),
+          user_email: profile?.userEmail?.trim() || undefined,
           samples: samples.map((s) => ({
             video_t: s.video_t,
             score: s.score,
@@ -927,7 +934,7 @@ function App() {
     } finally {
       setWorkoutSummaryLoading(false);
     }
-  }, [apiBase, referenceExerciseName, referenceExerciseMuscle]);
+  }, [apiBase, referenceExerciseName, referenceExerciseMuscle, profile?.userEmail]);
 
   useEffect(() => {
     if (!isStreaming || !isModelReady) return;
@@ -1052,6 +1059,8 @@ function App() {
                     exercise_name: referenceExerciseName,
                     exercise_muscle: referenceExerciseMuscle,
                     temporal_trend: temporalTrendRef.current,
+                    user_id: getUserId(),
+                    user_email: profile?.userEmail?.trim() || undefined,
                   }),
                 })
                   .then(async (r) => {

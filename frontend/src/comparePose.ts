@@ -37,7 +37,63 @@ const RIGHT_KNEE = 26;
 const LEFT_ANKLE = 27;
 const RIGHT_ANKLE = 28;
 
+/** YOLOv8/COCO keypoint indices (17 keypoints) */
+const COCO_L_SHOULDER = 5;
+const COCO_R_SHOULDER = 6;
+const COCO_L_ELBOW = 7;
+const COCO_R_ELBOW = 8;
+const COCO_L_WRIST = 9;
+const COCO_R_WRIST = 10;
+const COCO_L_HIP = 11;
+const COCO_R_HIP = 12;
+const COCO_L_KNEE = 13;
+const COCO_R_KNEE = 14;
+const COCO_L_ANKLE = 15;
+const COCO_R_ANKLE = 16;
+
 type Vec3 = [number, number, number];
+
+/**
+ * Convert YOLOv8/COCO 17-keypoint format to MediaPipe 33-landmark format.
+ * Backend preprocess (Modal, pose_server) may use YOLOv8 which returns 17 keypoints;
+ * the comparison logic expects MediaPipe 33 landmarks.
+ */
+function coco17ToMediaPipe33(coco: Vec3[]): Vec3[] {
+  if (coco.length < 17) return [];
+  // COCO uses [x, y, confidence]; MediaPipe uses [x, y, z]. Use 0 for z (depth).
+  const get = (i: number): Vec3 => [coco[i][0], coco[i][1], 0];
+  const mid = (a: Vec3, b: Vec3): Vec3 => [
+    (a[0] + b[0]) / 2,
+    (a[1] + b[1]) / 2,
+    (a[2] + b[2]) / 2,
+  ];
+  const ls = get(COCO_L_SHOULDER);
+  const rs = get(COCO_R_SHOULDER);
+  const lh = get(COCO_L_HIP);
+  const rh = get(COCO_R_HIP);
+  const bodyCenter = mid(mid(ls, rs), mid(lh, rh));
+  const arr: Vec3[] = new Array(33);
+  for (let i = 0; i < 33; i++) arr[i] = [...bodyCenter];
+  arr[11] = ls;
+  arr[12] = rs;
+  arr[13] = get(COCO_L_ELBOW);
+  arr[14] = get(COCO_R_ELBOW);
+  arr[15] = get(COCO_L_WRIST);
+  arr[16] = get(COCO_R_WRIST);
+  arr[23] = lh;
+  arr[24] = rh;
+  arr[25] = get(COCO_L_KNEE);
+  arr[26] = get(COCO_R_KNEE);
+  arr[27] = get(COCO_L_ANKLE);
+  arr[28] = get(COCO_R_ANKLE);
+  return arr;
+}
+
+function toMediaPipe33(landmarks: Vec3[]): Vec3[] {
+  if (landmarks.length >= 33) return landmarks.slice(0, 33) as Vec3[];
+  if (landmarks.length === 17) return coco17ToMediaPipe33(landmarks);
+  return [];
+}
 
 function vecSub(a: Vec3, b: Vec3): Vec3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -383,12 +439,11 @@ export function comparePoseWithCoaching(
   const limbScores: Record<string, number> = {};
   const exerciseMuscle = (options?.exerciseMuscle || "").trim();
 
-  if (
-    !reference.landmarks?.length ||
-    !live.landmarks?.length ||
-    reference.landmarks.length < 33 ||
-    live.landmarks.length < 33
-  ) {
+  // Convert YOLOv8/COCO 17-keypoint format to MediaPipe 33 when needed (backend preprocess uses YOLOv8)
+  const refLm = toMediaPipe33((reference.landmarks || []) as Vec3[]);
+  const liveLm = toMediaPipe33((live.landmarks || []) as Vec3[]);
+
+  if (!refLm.length || !liveLm.length) {
     return {
       score: 0,
       feedback: { joint: "frame", message: "Limbs not in frame" },
@@ -396,7 +451,7 @@ export function comparePoseWithCoaching(
     };
   }
 
-  const liveNorm = live.landmarks as Vec3[];
+  const liveNorm = liveLm;
 
   if (!isUserInFrame(liveNorm, exerciseMuscle)) {
     return {
@@ -406,7 +461,10 @@ export function comparePoseWithCoaching(
     };
   }
 
-  const { limbScores: scores } = scorePoseSimilarity(reference, live);
+  const { limbScores: scores } = scorePoseSimilarity(
+    { landmarks: refLm },
+    { landmarks: liveLm }
+  );
 
   let totalWeight = 0;
   let weightedSum = 0;
