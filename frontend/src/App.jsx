@@ -777,6 +777,7 @@ function App() {
   const lastFetchMsRef = useRef(-Infinity);
   const voiceCoachingRef = useRef(null);
   const voiceCoachOnRef = useRef(voiceCoachOn);
+  const contextBufferRef = useRef([]);
   voiceCoachOnRef.current = voiceCoachOn;
   const llmCoachingAvailableRef = useRef(llmCoachingAvailable);
   llmCoachingAvailableRef.current = llmCoachingAvailable;
@@ -806,8 +807,9 @@ function App() {
   }, [isStreaming, isModelReady, apiBase, ttsEnabled]);
 
   useEffect(() => {
-    if (activeTab !== "workout" && voiceCoachingRef.current) {
-      voiceCoachingRef.current.reset();
+    if (activeTab !== "workout") {
+      if (voiceCoachingRef.current) voiceCoachingRef.current.reset();
+      contextBufferRef.current = [];
     }
   }, [activeTab]);
 
@@ -1029,13 +1031,32 @@ function App() {
                 temporalTrendRef.current = null;
               }
               const worstScoreForLimb = worstLimb ? (limbScores[worstLimb] ?? 1) : 1;
-              const substantialError = score < 0.75 && worstScoreForLimb < 0.75;
+              const substantialError = score < 0.55 && worstScoreForLimb < 0.55;
+
+              const BUFFER_DURATION_MS = 2500;
+              const LLM_COOLDOWN_MS = 3500; // ~3 per 10 seconds max
+
+              const buf = contextBufferRef.current;
+              if (substantialError && feedback?.message) {
+                buf.push({
+                  score,
+                  feedback_message: feedback.message,
+                  worst_limb: feedback.joint,
+                  t: now,
+                });
+                while (buf.length > 0 && now - buf[0].t > BUFFER_DURATION_MS) buf.shift();
+              } else {
+                buf.length = 0;
+              }
+              const bufferHasEnoughContext = buf.length > 0 && now - buf[0].t >= BUFFER_DURATION_MS - 200;
+
               if (voiceCoachOnRef.current && voiceCoachingRef.current) {
                 const willFetchLlm =
                   llmCoachingAvailableRef.current &&
                   feedback?.message &&
                   substantialError &&
-                  now - lastLlmFetchMsRef.current >= 5000;
+                  bufferHasEnoughContext &&
+                  now - lastLlmFetchMsRef.current >= LLM_COOLDOWN_MS;
                 voiceCoachingRef.current.onFrame(
                   { score, limbScores, feedback },
                   { deferToLlm: willFetchLlm }
@@ -1045,9 +1066,17 @@ function App() {
                 llmCoachingAvailableRef.current &&
                 feedback?.message &&
                 substantialError &&
-                now - lastLlmFetchMsRef.current >= 5000
+                bufferHasEnoughContext &&
+                now - lastLlmFetchMsRef.current >= LLM_COOLDOWN_MS
               ) {
                 lastLlmFetchMsRef.current = now;
+                const contextBufferToSend = buf.slice(-30).map((f) => ({
+                  score: f.score,
+                  feedback_message: f.feedback_message,
+                  worst_limb: f.worst_limb,
+                  t: f.t,
+                }));
+                buf.length = 0;
                 fetch(`${apiBase}/api/coaching/llm`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
@@ -1061,6 +1090,7 @@ function App() {
                     temporal_trend: temporalTrendRef.current,
                     user_id: getUserId(),
                     user_email: profile?.userEmail?.trim() || undefined,
+                    context_buffer: contextBufferToSend,
                   }),
                 })
                   .then(async (r) => {

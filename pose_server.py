@@ -452,6 +452,14 @@ class ComparePoseRequest(BaseModel):
     feedback: Optional[PrimaryIssueModel] = None
 
 
+class InstantContextFrame(BaseModel):
+    """Single frame from the instant context buffer (last 2–3 seconds of form data)."""
+    score: float
+    feedback_message: Optional[str] = None
+    worst_limb: Optional[str] = None
+    t: Optional[float] = None  # timestamp relative to buffer start
+
+
 class LLMCoachingRequest(BaseModel):
     score: float
     limbScores: Optional[dict[str, float]] = None
@@ -462,6 +470,7 @@ class LLMCoachingRequest(BaseModel):
     temporal_trend: Optional[str] = None  # "improving" | "worsening" | null
     user_id: Optional[str] = None
     user_email: Optional[str] = None  # Used as Supermemory user identifier when set
+    context_buffer: Optional[list[InstantContextFrame]] = None  # Last 2–3s of form data for richer understanding
 
 
 class SupermemoryAddExerciseRequest(BaseModel):
@@ -886,6 +895,36 @@ async def llm_coaching(request: Request, body: LLMCoachingRequest) -> JSONRespon
     if body.temporal_trend:
         context_parts.append(f" Trend: form is {body.temporal_trend} over the last few seconds.")
 
+    # Instant context buffer: last 2–3 seconds of form data for richer understanding
+    if body.context_buffer and len(body.context_buffer) > 0:
+        buf = body.context_buffer
+        scores = [f.score for f in buf]
+        feedbacks = [f.feedback_message for f in buf if f.feedback_message]
+        limbs = [f.worst_limb for f in buf if f.worst_limb]
+        avg_score = sum(scores) / len(scores) if scores else body.score
+        consistent_limb = (
+            max(set(limbs), key=limbs.count) if limbs else body.worst_limb
+        )
+        instant_context_summary = (
+            f"\n\nInstant context (last 2–3 seconds): {len(buf)} frames. "
+            f"Average score: {round(avg_score * 100)}%. "
+            f"Consistent issue: {consistent_limb.replace('_', ' ') if consistent_limb else 'various'}. "
+            f"Most common cue: {feedbacks[0] if feedbacks else body.feedback_message or 'unknown'}."
+        )
+        context_parts.append(instant_context_summary)
+
+        # Store instant context in Supermemory (enriches user profile for future sessions)
+        if SUPERMEMORY_API_KEY and (body.user_id or body.user_email):
+            summary = (
+                f"Form drift during {body.exercise_name or 'exercise'}: "
+                f"score {round(avg_score * 100)}%, issue: {consistent_limb or 'unknown'}. "
+                f"Cue: {feedbacks[0] if feedbacks else body.feedback_message or 'adjust form'}."
+            )
+            custom_id = f"instant_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{(body.exercise_name or 'ex').replace(' ', '_')[:15]}"
+            await _supermemory_add_user(
+                summary, custom_id, user_id=body.user_id or "default", user_email=body.user_email
+            )
+
     # Supermemory RAG: fetch exercise form cues + user's past workout context
     rag_context = ""
     if body.exercise_name or body.worst_limb:
@@ -899,11 +938,11 @@ async def llm_coaching(request: Request, body: LLMCoachingRequest) -> JSONRespon
 
     context = "".join(context_parts).strip() + rag_context
 
-    system_prompt = """You are a concise fitness coach. The user is mirroring an exercise demo. Give feedback ONLY for the PRIMARY issue—the worst limb or body part mentioned in the context.
+    system_prompt = """You are a concise fitness coach. The user is mirroring an exercise demo. You receive instant context from the last 2–3 seconds of form data—use it to develop a clear understanding and give the SINGLE most valuable tip.
 
 RULES:
 - Base your tip on the specific limb/body part flagged (worst_limb, lowest-scoring limbs). Do not invent new issues.
-- Use the generic feedback as a starting point but make it more actionable. If it says "raise left arm", say "Raise your left arm to shoulder height" or similar.
+- Use the generic feedback and instant context (consistent issue over time) to make it actionable. If it says "raise left arm", say "Raise your left arm to shoulder height" or similar.
 - Be concrete: name the body part and what to do. Examples: "Tuck your elbows in", "Keep your knee over your ankle", "Straighten your back—avoid rounding".
 - NEVER say vague things like "adjust slightly" or "move a little". Be specific.
 - Keep the tip under 12 words. Reply with ONLY the tip, no preamble or quotes."""

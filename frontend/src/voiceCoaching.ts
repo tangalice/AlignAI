@@ -38,7 +38,7 @@ export interface VoiceCoachingOutput {
 
 /** Only speak when error exceeds this. 0.35 = speak when limb score below 65%. Higher = less sensitive. */
 const ERROR_THRESHOLD = 0.35;
-const COOLDOWN_MS = 3500;
+const COOLDOWN_MS = 3500; // ~3 per 10 seconds max
 
 function mapToGroupScores(limbScores: Record<string, number>): Record<LimbGroup, number> {
   const out = {} as Record<LimbGroup, number>;
@@ -303,8 +303,8 @@ export class VoiceCoach {
   }
 }
 
-// Only coach when form error is substantial (score < 0.75)
-const COACH_SCORE_THRESHOLD = 0.75;
+// Only intervene when form difference is VERY different (score < 0.55)
+const COACH_SCORE_THRESHOLD = 0.55;
 
 // ---------------------------------------------------------------------------
 // Engine — processes frames and fires coaching speech

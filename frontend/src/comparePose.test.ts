@@ -124,6 +124,29 @@ describe("comparePoseWithCoaching", () => {
     expect(result.feedback?.joint).toBeDefined();
     expect(result.feedback?.message).toBeDefined();
   });
+
+  it("scores mirrored poses correctly (user mirrors instructor)", () => {
+    // Reference: left arm raised (elbow up-left), right arm down
+    const ref = makePose({
+      [LEFT_ELBOW]: [0.2, 0.25, 0],
+      [LEFT_WRIST]: [0.1, 0.35, 0],
+      [RIGHT_ELBOW]: [0.75, 0.4, 0],
+      [RIGHT_WRIST]: [0.8, 0.5, 0],
+    });
+    // User mirrors: raises RIGHT arm (should match ref's LEFT arm after flip)
+    const liveMirrored = makePose({
+      [LEFT_ELBOW]: [0.75, 0.4, 0],
+      [LEFT_WRIST]: [0.8, 0.5, 0],
+      [RIGHT_ELBOW]: [0.2, 0.25, 0],
+      [RIGHT_WRIST]: [0.1, 0.35, 0],
+    });
+    const result = comparePoseWithCoaching(
+      { landmarks: ref },
+      { landmarks: liveMirrored }
+    );
+    // After mirror flip, user's right arm maps to ref's left arm → high score
+    expect(result.score).toBeGreaterThan(0.7);
+  });
 });
 
 describe("scorePoseSimilarity", () => {

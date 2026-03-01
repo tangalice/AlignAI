@@ -95,6 +95,28 @@ function toMediaPipe33(landmarks: Vec3[]): Vec3[] {
   return [];
 }
 
+/**
+ * Swap left/right landmarks for mirror mode. When the user faces the camera and mirrors
+ * the instructor, their right arm matches the instructor's left. Swapping ensures we
+ * compare corresponding limbs (ref left ↔ user right, ref right ↔ user left).
+ */
+function flipPoseForMirror(landmarks: Vec3[]): Vec3[] {
+  if (landmarks.length < 33) return landmarks;
+  const out = landmarks.map((p) => [...p]) as Vec3[];
+  const pairs: [number, number][] = [
+    [LEFT_SHOULDER, RIGHT_SHOULDER],
+    [LEFT_ELBOW, RIGHT_ELBOW],
+    [LEFT_WRIST, RIGHT_WRIST],
+    [LEFT_HIP, RIGHT_HIP],
+    [LEFT_KNEE, RIGHT_KNEE],
+    [LEFT_ANKLE, RIGHT_ANKLE],
+  ];
+  for (const [a, b] of pairs) {
+    [out[a], out[b]] = [out[b], out[a]];
+  }
+  return out;
+}
+
 function vecSub(a: Vec3, b: Vec3): Vec3 {
   return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 }
@@ -441,7 +463,9 @@ export function comparePoseWithCoaching(
 
   // Convert YOLOv8/COCO 17-keypoint format to MediaPipe 33 when needed (backend preprocess uses YOLOv8)
   const refLm = toMediaPipe33((reference.landmarks || []) as Vec3[]);
-  const liveLm = toMediaPipe33((live.landmarks || []) as Vec3[]);
+  let liveLm = toMediaPipe33((live.landmarks || []) as Vec3[]);
+  // Flip user pose for mirror mode: user faces camera, so their right matches instructor's left
+  liveLm = flipPoseForMirror(liveLm);
 
   if (!refLm.length || !liveLm.length) {
     return {
