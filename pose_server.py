@@ -889,7 +889,9 @@ async def llm_coaching(request: Request, body: LLMCoachingRequest) -> JSONRespon
         limb_label = body.worst_limb.replace("_", " ")
         context_parts.append(f" PRIMARY ISSUE TO ADDRESS: {limb_label}.")
     if body.feedback_message:
-        context_parts.append(f" Generic cue from pose comparison: {body.feedback_message}")
+        context_parts.append(
+            f" Pose comparison flagged this area (use form guides for exact cue): {body.feedback_message}"
+        )
     if worst_limbs:
         context_parts.append(f" Other weak areas: {', '.join(w.replace('_', ' ') for w in worst_limbs)}.")
     if body.temporal_trend:
@@ -925,29 +927,39 @@ async def llm_coaching(request: Request, body: LLMCoachingRequest) -> JSONRespon
                 summary, custom_id, user_id=body.user_id or "default", user_email=body.user_email
             )
 
-    # Supermemory RAG: fetch exercise form cues + user's past workout context
+    # Supermemory RAG: fetch exercise-specific form cues + user's past workout context
     rag_context = ""
     if body.exercise_name or body.worst_limb:
-        search_q = f"{body.exercise_name or 'exercise'} form cues {body.worst_limb or ''}".strip()
+        search_q = (
+            f"{body.exercise_name or 'exercise'} "
+            f"{body.worst_limb.replace('_', ' ') if body.worst_limb else ''} "
+            f"form cue common mistake correct technique"
+        ).strip()
         chunks = await _supermemory_search(
-            search_q, limit=5, include_user=True,
+            search_q, limit=8, include_user=True,
             user_id=body.user_id or "default", user_email=body.user_email
         )
         if chunks:
-            rag_context = "\n\nContext (form guides + user's past sessions):\n" + "\n".join(f"- {c}" for c in chunks)
+            rag_context = (
+                "\n\nPRIORITY: Form guides and user history below. Use these to say EXACTLY what is wrong:\n"
+                + "\n".join(f"- {c}" for c in chunks)
+            )
 
     context = "".join(context_parts).strip() + rag_context
 
-    system_prompt = """You are a concise fitness coach. The user is mirroring an exercise demo. You receive instant context from the last 2–3 seconds of form data—use it to develop a clear understanding and give the SINGLE most valuable tip.
+    system_prompt = """You are a fitness coach. The user is mirroring an exercise demo. Give one short, explanatory tip that states what each relevant body part should do—based on the form guides and user history.
+
+STYLE:
+- Explanatory but EXTREMELY concise. Cover the key body parts in a brief checklist.
+- Examples: "Back flat, elbows in, drive through heels." | "Chest up, knees over toes, core braced." | "Shoulder blades back, bar path straight, lock hips at top."
+- One phrase per body part, comma-separated. No filler words.
+- Use form guides and user history to pick the RIGHT cues for this exercise.
 
 RULES:
-- Base your tip on the specific limb/body part flagged (worst_limb, lowest-scoring limbs). Do not invent new issues.
-- Use the generic feedback and instant context (consistent issue over time) to make it actionable. If it says "raise left arm", say "Raise your left arm to shoulder height" or similar.
-- Be concrete: name the body part and what to do. Examples: "Tuck your elbows in", "Keep your knee over your ankle", "Straighten your back—avoid rounding".
-- NEVER say vague things like "adjust slightly" or "move a little". Be specific.
-- Keep the tip under 12 words. Reply with ONLY the tip, no preamble or quotes."""
+- Never say: "adjust", "step into frame", "fix your form", or vague phrases.
+- Be concrete and helpful. Say what each part should be: "Back flat", "Elbows tucked", "Knees out".
+- Under 12 words. Reply with ONLY the tip, no preamble."""
 
-    fallback = body.feedback_message or "Adjust your form to match the demo."
     try:
         from openai import AsyncOpenAI
 
@@ -965,13 +977,16 @@ RULES:
             msg = (r.choices[0].message.content or "").strip()
         else:
             msg = ""
-        if not msg:
-            msg = fallback
+        # Reject vague responses—don't speak generic "adjust" or "step into frame"
+        if not msg or any(
+            v in msg.lower() for v in ("adjust", "step into frame", "move a little", "fix your form")
+        ):
+            msg = ""  # Silence is better than vague feedback
         return JSONResponse(content={"message": msg})
     except Exception as e:
         err_msg = str(e)
         print(f"[llm-coaching] error: {err_msg}")
-        return JSONResponse(content={"message": fallback})
+        return JSONResponse(content={"message": ""})
 
 
 @app.post("/api/workout/summary")

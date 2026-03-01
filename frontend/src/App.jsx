@@ -1031,7 +1031,11 @@ function App() {
                 temporalTrendRef.current = null;
               }
               const worstScoreForLimb = worstLimb ? (limbScores[worstLimb] ?? 1) : 1;
-              const substantialError = score < 0.55 && worstScoreForLimb < 0.55;
+              const isFrameVisibilityIssue = feedback?.joint === "frame";
+              const substantialError =
+                !isFrameVisibilityIssue &&
+                score < 0.55 &&
+                worstScoreForLimb < 0.55;
 
               const BUFFER_DURATION_MS = 2500;
               const LLM_COOLDOWN_MS = 3500; // ~3 per 10 seconds max
