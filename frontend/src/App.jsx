@@ -148,7 +148,6 @@ function App() {
       setPreprocessError(null);
       setPreprocessResult(null);
       setExerciseSearchFocused(false);
-      setExerciseResults([]);
     } else if (referenceVideoUrl && String(referenceVideoUrl).includes("/api/youtube/")) {
       setReferenceVideoUrl("");
       setIsPastedYoutubeShort(false);
@@ -487,8 +486,12 @@ function App() {
       setPreprocessError("Select an exercise first.");
       return;
     }
-    // Try API preprocess first (Modal GPU) when we have a fetchable URL
-    if (referenceVideoUrl.startsWith("http://") || referenceVideoUrl.startsWith("https://")) {
+    // Use API preprocess (same as workout vids) when we have a YouTube URL: either direct or our proxy (/api/youtube/xxx)
+    const pastedYtId = referenceVideoUrl?.match(/\/api\/youtube\/([^/?#]+)/)?.[1] ?? null;
+    const preprocessUrl = referenceVideoUrl.startsWith("http://") || referenceVideoUrl.startsWith("https://")
+      ? referenceVideoUrl
+      : (pastedYtId ? `https://www.youtube.com/watch?v=${pastedYtId}` : null);
+    if (preprocessUrl) {
       setPreprocessLoading(true);
       preprocessLoadingRef.current = true;
       setPreprocessError(null);
@@ -502,7 +505,7 @@ function App() {
         const res = await fetch(`${apiBase}/api/preprocess`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: referenceVideoUrl, sample_fps: 8 }),
+          body: JSON.stringify({ url: preprocessUrl, sample_fps: 8 }),
         });
         const data = await res.json();
         if (res.ok) {
@@ -516,7 +519,8 @@ function App() {
         setPreprocessLoading(false);
         preprocessLoadingRef.current = false;
         setPreprocessError(err.message || "API preprocess failed. Trying browser…");
-        // Fall through to in-browser preprocess
+        // Fall through to in-browser preprocess only when we have a video element (pasted YT)
+        if (!pastedYtId) return;
       }
     }
 
@@ -711,6 +715,7 @@ function App() {
 
   const referenceFramesRef = useRef(null);
   const lastPreprocessedExerciseIdRef = useRef(null);
+  const lastPreprocessedSourceRef = useRef(null); // exercise id or referenceVideoUrl (for pasted YT)
 
   // Pause reference video while extracting poses
   useEffect(() => {
@@ -722,27 +727,29 @@ function App() {
     }
   }, [preprocessLoading]);
 
-  // Auto-extract pose coordinates when exercise video loads (YouTube or Workout tab)
+  // Auto-extract pose coordinates when reference video loads (workout from search or pasted YouTube)
+  const preprocessSourceKey = referenceExerciseId ?? (referenceVideoUrl || null);
   useEffect(() => {
     if (
       activeTab !== "workout" ||
       !referenceVideoUrl ||
-      !referenceExerciseId ||
       !(ytDuration > 0) ||
       preprocessLoading ||
-      lastPreprocessedExerciseIdRef.current === referenceExerciseId
+      lastPreprocessedSourceRef.current === preprocessSourceKey
     ) {
       return;
     }
+    lastPreprocessedSourceRef.current = preprocessSourceKey;
     lastPreprocessedExerciseIdRef.current = referenceExerciseId;
     handlePreprocess();
-  }, [activeTab, referenceVideoUrl, referenceExerciseId, ytDuration, preprocessLoading, handlePreprocess]);
+  }, [activeTab, referenceVideoUrl, referenceExerciseId, preprocessSourceKey, ytDuration, preprocessLoading, handlePreprocess]);
 
   useEffect(() => {
-    if (!referenceExerciseId) {
+    if (!referenceExerciseId && !referenceVideoUrl) {
       lastPreprocessedExerciseIdRef.current = null;
+      lastPreprocessedSourceRef.current = null;
     }
-  }, [referenceExerciseId]);
+  }, [referenceExerciseId, referenceVideoUrl]);
 
   useEffect(() => {
     if (!preprocessResult) {
@@ -1261,7 +1268,7 @@ function App() {
                 <svg className="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
                 <input
                   type="text"
-                  placeholder="Search workouts... (e.g. Squats, Rotator Cuff PT)"
+                  placeholder="Search workouts or paste a YouTube link (e.g. Squats, youtube.com/watch?v=...)"
                   value={exerciseSearchQuery}
                   onChange={(e) => setExerciseSearchQuery(e.target.value)}
                   onFocus={() => setExerciseSearchFocused(true)}
@@ -1329,6 +1336,7 @@ function App() {
                         ))}
                       </div>
                     )}
+                    <div className="search-hint search-paste-hint">Or paste a YouTube link to use any video.</div>
                   </div>
                 )}
               </>
@@ -1413,7 +1421,7 @@ function App() {
               ) : (
                 <div className="video-empty">
                   {activeTab === "workout"
-                    ? "Search for a workout to load reference"
+                    ? "Search by name or paste a YouTube link to load reference"
                     : "Enter a description above to generate"}
                 </div>
               )}
