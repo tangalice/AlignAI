@@ -58,6 +58,10 @@ function App() {
   const [coachingFeedback, setCoachingFeedback] = useState(null);
   const [voiceCoachOn, setVoiceCoachOn] = useState(true);
   const [llmCoachingAvailable, setLlmCoachingAvailable] = useState(false);
+  const [workoutActive, setWorkoutActive] = useState(false);
+  const [workoutSummary, setWorkoutSummary] = useState(null);
+  const [workoutSummaryLoading, setWorkoutSummaryLoading] = useState(false);
+  const [workoutSummaryError, setWorkoutSummaryError] = useState(null);
 
   // Tabs: "youtube" | "ai"
   const [activeTab, setActiveTab] = useState("youtube");
@@ -341,14 +345,14 @@ function App() {
         el.currentTime = clamped;
       });
 
-    setPreprocessLoading(true);
-    setPreprocessError(null);
-    setPreprocessResult(null);
-
     const originalPaused = video.paused;
     const originalTime = video.currentTime;
     const originalRate = video.playbackRate;
 
+    setPreprocessLoading(true);
+    setPreprocessError(null);
+    setPreprocessResult(null);
+    video.pause();
     let offlineLandmarker = null;
 
     try {
@@ -542,6 +546,10 @@ function App() {
   const lastLlmFetchMsRef = useRef(-Infinity);
   const compareScoreRef = useRef(null); // 0–100, for overlay and skeleton color
   const [comparisonScore, setComparisonScore] = useState(null); // synced for UI display
+  const workoutSamplesRef = useRef([]);
+  const workoutStartedAtRef = useRef(null);
+  const workoutActiveRef = useRef(false);
+  workoutActiveRef.current = workoutActive;
 
   useEffect(() => {
     if (!isStreaming || !isModelReady) return;
@@ -563,6 +571,58 @@ function App() {
       voiceCoachingRef.current.cancel();
     }
   }, [voiceCoachOn]);
+
+  const handleStartWorkout = () => {
+    workoutSamplesRef.current = [];
+    workoutStartedAtRef.current = performance.now() / 1000;
+    setWorkoutActive(true);
+    setWorkoutSummary(null);
+    setWorkoutSummaryError(null);
+    const video = ytVideoRef.current;
+    if (video) video.play().catch(() => {});
+  };
+
+  const handleEndWorkout = async () => {
+    setWorkoutActive(false);
+    const video = ytVideoRef.current;
+    if (video) video.pause();
+    const samples = workoutSamplesRef.current;
+    const startedAt = workoutStartedAtRef.current;
+    const durationSec = startedAt != null ? performance.now() / 1000 - startedAt : null;
+
+    if (!samples.length) {
+      setWorkoutSummary("No form data was recorded during this workout. Start the exercise and mirror the demo to get a summary next time.");
+      return;
+    }
+
+    setWorkoutSummaryLoading(true);
+    setWorkoutSummaryError(null);
+    try {
+      const res = await fetch(`${apiBase}/api/workout/summary`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          exercise_name: referenceExerciseName || "",
+          exercise_muscle: referenceExerciseMuscle || "",
+          duration_sec: durationSec,
+          samples: samples.map((s) => ({
+            video_t: s.video_t,
+            score: s.score,
+            limbScores: s.limbScores,
+            feedback: s.feedback,
+          })),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Summary request failed");
+      setWorkoutSummary(data.summary || "Your workout was recorded.");
+    } catch (err) {
+      setWorkoutSummaryError(err.message || "Could not generate summary");
+      setWorkoutSummary(null);
+    } finally {
+      setWorkoutSummaryLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!isStreaming || !isModelReady) return;
@@ -685,6 +745,14 @@ function App() {
                   body: JSON.stringify({ video_t: videoT, score, limbScores, feedback }),
                 }).catch(() => {});
               }
+              if (workoutActiveRef.current && workoutSamplesRef.current.length < 500) {
+                workoutSamplesRef.current.push({
+                  video_t: videoT,
+                  score,
+                  limbScores: limbScores ? { ...limbScores } : undefined,
+                  feedback: feedback ? { joint: feedback.joint, message: feedback.message } : undefined,
+                });
+              }
             } else {
               compareScoreRef.current = null;
               setComparisonScore(null);
@@ -726,7 +794,11 @@ function App() {
   }, [isStreaming, isModelReady, activeTab, apiBase, referenceExerciseMuscle, referenceExerciseName]);
 
   useEffect(() => {
-    if (activeTab !== "youtube") setCoachingFeedback(null);
+    if (activeTab !== "youtube") {
+      setCoachingFeedback(null);
+      setWorkoutSummary(null);
+      setWorkoutSummaryError(null);
+    }
   }, [activeTab]);
 
   // Draw skeleton overlay on YouTube video from reference frames
@@ -1163,8 +1235,34 @@ function App() {
               />
               <span>Voice coach</span>
             </label>
+            {activeTab === "youtube" && ytVideoSrc && (
+              <div className="workout-actions">
+                {!workoutActive ? (
+                  <button type="button" className="btn-workout btn-start" onClick={handleStartWorkout}>
+                    Start workout
+                  </button>
+                ) : (
+                  <button type="button" className="btn-workout btn-end" onClick={handleEndWorkout} disabled={workoutSummaryLoading}>
+                    {workoutSummaryLoading ? "Generating summary…" : "End workout"}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </section>
+
+        {(workoutSummary || workoutSummaryError || workoutSummaryLoading) && (
+          <section className="panel workout-summary-panel">
+            <h2>Workout summary</h2>
+            {workoutSummaryLoading && <div className="workout-summary-loading">Generating your AI summary…</div>}
+            {workoutSummary && !workoutSummaryLoading && (
+              <div className="workout-summary-content">{workoutSummary}</div>
+            )}
+            {workoutSummaryError && !workoutSummaryLoading && (
+              <div className="workout-summary-error">{workoutSummaryError}</div>
+            )}
+          </section>
+        )}
       </main>
 
 

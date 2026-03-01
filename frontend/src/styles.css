@@ -721,6 +721,74 @@ body {
   accent-color: #ff9f43;
 }
 
+.workout-actions {
+  margin-top: 8px;
+}
+
+.btn-workout {
+  padding: 10px 20px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.btn-workout.btn-start {
+  color: #0a0a12;
+  background: #22c55e;
+}
+
+.btn-workout.btn-start:hover {
+  background: #4ade80;
+}
+
+.btn-workout.btn-end {
+  color: #fff;
+  background: #ef4444;
+}
+
+.btn-workout.btn-end:hover:not(:disabled) {
+  background: #f87171;
+}
+
+.btn-workout.btn-end:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.workout-summary-panel {
+  max-width: 680px;
+  grid-column: 1 / -1;
+}
+
+.workout-summary-loading {
+  padding: 16px 0;
+  font-size: 0.95rem;
+  opacity: 0.9;
+}
+
+.workout-summary-content {
+  font-size: 0.95rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.workout-summary-content p {
+  margin: 0 0 12px;
+}
+
+.workout-summary-content p:last-child {
+  margin-bottom: 0;
+}
+
+.workout-summary-error {
+  padding: 12px 0;
+  font-size: 0.95rem;
+  color: #f87171;
+}
+
 @media (min-width: 900px) {
   .header h1 {
     font-size: 2.4rem;

@@ -380,6 +380,20 @@ class LLMCoachingRequest(BaseModel):
     exercise_muscle: Optional[str] = None
 
 
+class WorkoutSample(BaseModel):
+    video_t: Optional[float] = None
+    score: float
+    limbScores: Optional[dict[str, float]] = None
+    feedback: Optional[PrimaryIssueModel] = None
+
+
+class WorkoutSummaryRequest(BaseModel):
+    exercise_name: str = ""
+    exercise_muscle: str = ""
+    duration_sec: Optional[float] = None
+    samples: list[WorkoutSample] = []
+
+
 class CompareRequest(BaseModel):
     """Request for Modal compare: reference and user pose sequences."""
     reference: dict  # { "frames": [{ "landmarks": [[x,y,z],...] }], ... }
@@ -555,6 +569,7 @@ async def tts_convert(body: TTSRequest) -> StreamingResponse:
 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+PPLX_API_KEY = os.environ.get("PPLX_API_KEY", "").strip()
 
 
 @app.get("/api/coaching/llm/config")
@@ -623,6 +638,91 @@ Reply with ONLY the tip, no preamble or quotes."""
         return JSONResponse(
             status_code=502,
             content={"error": err_msg, "message": fallback},
+        )
+
+
+@app.post("/api/workout/summary")
+async def workout_summary(body: WorkoutSummaryRequest) -> JSONResponse:
+    """Generate an AI summary of a workout session from accumulated pose comparison samples. Uses Perplexity API only."""
+    if not PPLX_API_KEY:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "PPLX_API_KEY not set. Add it to .env and restart the server.", "summary": None},
+        )
+
+    samples = body.samples or []
+    if not samples:
+        return JSONResponse(content={"summary": "No form data was recorded during this workout. Start the exercise and mirror the demo to get a summary next time."})
+
+    # Aggregate stats
+    scores = [s.score for s in samples if isinstance(s.score, (int, float))]
+    avg_score = sum(scores) / len(scores) if scores else 0
+    min_score = min(scores) if scores else 0
+    max_score = max(scores) if scores else 0
+
+    limb_counts: dict[str, int] = {}
+    feedback_messages: list[str] = []
+    for s in samples:
+        if s.feedback and s.feedback.message:
+            feedback_messages.append(s.feedback.message)
+        if s.limbScores:
+            for limb, sc in s.limbScores.items():
+                if isinstance(sc, (int, float)) and sc < 0.85:
+                    limb_counts[limb] = limb_counts.get(limb, 0) + 1
+
+    worst_limbs = sorted(limb_counts.keys(), key=lambda k: limb_counts[k], reverse=True)[:5]
+    unique_feedback = list(dict.fromkeys(feedback_messages))[:10]
+
+    exercise_info = (body.exercise_name or "this exercise").strip()
+    if body.exercise_muscle:
+        exercise_info += f" (target: {body.exercise_muscle})"
+
+    context = f"""Workout summary data:
+- Exercise: {exercise_info}
+- Duration: {body.duration_sec or 0:.0f} seconds
+- Form comparison samples: {len(samples)}
+- Average form score: {avg_score * 100:.0f}%
+- Best moment: {max_score * 100:.0f}%
+- Toughest moment: {min_score * 100:.0f}%
+- Most frequently flagged areas: {', '.join(w.replace('_', ' ') for w in worst_limbs) if worst_limbs else 'none'}
+- Feedback moments: {'; '.join(unique_feedback[:5]) if unique_feedback else 'none'}"""
+
+    system_prompt = """You are a friendly, encouraging fitness coach. The user just finished a form-check workout session.
+Generate a short, informative AI summary (2-4 paragraphs) that:
+1. Opens with a brief overall assessment — what went well, energy level, etc.
+2. Highlights 1-2 things they did well (be specific, reference the data).
+3. Suggests 1-2 actionable improvements for next time (body part or form cue).
+4. Ends on an encouraging note.
+
+Be concise, warm, and specific. Use plain language. Avoid generic fluff. Reference the actual areas flagged (arms, legs, torso, etc.) when relevant. 
+Format as readable paragraphs, no bullet points or headers unless you want one short "What to work on" line."""
+
+    try:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(
+            api_key=PPLX_API_KEY,
+            base_url="https://api.perplexity.ai",
+        )
+        model = "llama-3.1-sonar-small-128k-online"
+        r = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": context},
+            ],
+            max_tokens=400,
+            temperature=0.7,
+        )
+        summary = (r.choices[0].message.content or "").strip()
+        if not summary:
+            summary = "Your workout session was recorded. Keep practicing to improve your form!"
+        return JSONResponse(content={"summary": summary})
+    except Exception as e:
+        print(f"[workout-summary] error: {e}")
+        return JSONResponse(
+            status_code=502,
+            content={"error": str(e), "summary": "Could not generate summary. Your workout was still recorded — try again later."},
         )
 
 
