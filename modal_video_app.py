@@ -227,7 +227,8 @@ async def tts(request: Request):
             media_type="application/json",
             status_code=503,
         )
-    voice_id = os.environ.get("ELEVENLABS_VOICE_ID", ELEVENLABS_DEFAULT_VOICE_ID).strip()
+    # Use voice_id from request (passed by backend from .env) or Modal secret/env default
+    voice_id = (body.get("voice_id") or "").strip() or os.environ.get("ELEVENLABS_VOICE_ID", ELEVENLABS_DEFAULT_VOICE_ID).strip()
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     params = {"output_format": "mp3_22050_32"}
     payload = {"text": text, "model_id": "eleven_multilingual_v2"}

@@ -163,45 +163,72 @@ export interface VoiceCoachConfig {
 export class VoiceCoach {
   private config: VoiceCoachConfig = {};
   private currentAudio: HTMLAudioElement | null = null;
+  /** Queue of messages to speak; next starts only after current finishes (no overlap). */
+  private speechQueue: string[] = [];
+  private busy = false;
+  private _requestId = 0;
 
   constructor(config?: VoiceCoachConfig) {
     this.config = config || {};
   }
 
+  private onSpeechDone(): void {
+    this.busy = false;
+    this.currentAudio = null;
+    if (this.speechQueue.length > 0) {
+      const next = this.speechQueue.shift()!;
+      this.doSpeak(next);
+    }
+  }
+
   speak(message: string): void {
     if (typeof window === "undefined") return;
-    if (!message.trim()) return;
+    const trimmed = message.trim();
+    if (!trimmed) return;
 
     if (!_unlocked) {
       console.log("[VoiceCoach] speech blocked: not unlocked yet");
       return;
     }
 
-    // Prefer ElevenLabs TTS when configured (apiBase can be empty – we use relative /api/tts then)
+    if (this.busy) {
+      this.speechQueue.push(trimmed);
+      return;
+    }
+    this.doSpeak(trimmed);
+  }
+
+  private doSpeak(text: string): void {
+    this.busy = true;
+
     if (this.config.ttsEnabled) {
-      this.speakViaElevenLabs(message.trim());
+      this.speakViaElevenLabs(text);
       return;
     }
 
-    // Fallback to Web Speech API
-    if (!window.speechSynthesis) return;
+    if (!window.speechSynthesis) {
+      this.busy = false;
+      return;
+    }
     const synth = window.speechSynthesis;
     synth.cancel();
 
-    const u = new SpeechSynthesisUtterance(message.trim());
+    const u = new SpeechSynthesisUtterance(text);
     u.lang = "en-US";
     u.rate = 1.05;
     u.volume = 1;
     u.pitch = 1;
     if (_defaultVoice) u.voice = _defaultVoice;
+    u.onend = () => this.onSpeechDone();
+    u.onerror = () => this.onSpeechDone();
     synth.speak(u);
-
-    console.log("[VoiceCoach] speaking (browser):", message.trim());
+    console.log("[VoiceCoach] speaking (browser):", text);
   }
 
   private speakViaElevenLabs(text: string): void {
     const base = (this.config.apiBase || "").replace(/\/$/, "");
     const url = base ? `${base}/api/tts` : "/api/tts";
+    const requestId = ++this._requestId;
 
     fetch(url, {
       method: "POST",
@@ -213,37 +240,54 @@ export class VoiceCoach {
         return r.blob();
       })
       .then((blob) => {
+        if (requestId !== this._requestId) {
+          this.onSpeechDone();
+          return;
+        }
         const audioUrl = URL.createObjectURL(blob);
         const audio = new Audio(audioUrl);
         this.currentAudio = audio;
         audio.onended = () => {
           URL.revokeObjectURL(audioUrl);
           if (this.currentAudio === audio) this.currentAudio = null;
+          this.onSpeechDone();
         };
         audio.onerror = (e) => {
           console.warn("[VoiceCoach] ElevenLabs play failed:", e);
           URL.revokeObjectURL(audioUrl);
           if (this.currentAudio === audio) this.currentAudio = null;
+          this.onSpeechDone();
         };
         audio.play();
         console.log("[VoiceCoach] speaking (ElevenLabs):", text.slice(0, 50) + (text.length > 50 ? "…" : ""));
       })
       .catch((e) => {
         console.warn("[VoiceCoach] ElevenLabs fetch failed:", e);
-        // Fallback to browser speech
+        if (requestId !== this._requestId) {
+          this.onSpeechDone();
+          return;
+        }
         if (typeof window !== "undefined" && window.speechSynthesis) {
           const u = new SpeechSynthesisUtterance(text);
           u.lang = "en-US";
           if (_defaultVoice) u.voice = _defaultVoice;
+          u.onend = () => this.onSpeechDone();
+          u.onerror = () => this.onSpeechDone();
           window.speechSynthesis.speak(u);
           console.log("[VoiceCoach] fallback to browser speech");
+        } else {
+          this.onSpeechDone();
         }
       });
   }
 
   cancel(): void {
+    this._requestId++;
+    this.speechQueue = [];
+    this.busy = false;
     if (this.currentAudio) {
       this.currentAudio.pause();
+      this.currentAudio.currentTime = 0;
       this.currentAudio = null;
     }
     if (typeof window !== "undefined" && window.speechSynthesis) {

@@ -6,10 +6,13 @@ import re
 import tempfile
 import time
 from difflib import get_close_matches
+from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Load .env from cwd and from directory containing this script (so it works from any cwd)
 load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # Fix SSL certs on macOS (python.org installs)
 try:
@@ -18,7 +21,6 @@ try:
 except ImportError:
     pass
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -629,11 +631,18 @@ async def tts_convert(request: Request, body: TTSRequest) -> StreamingResponse:
     api_key = _get_elevenlabs_api_key()
 
     if modal_base:
-        # Prefer Modal TTS (Eleven Labs with coach-like voice; API key lives in Modal secret).
+        # Prefer Modal TTS (Eleven Labs; voice_id from .env so local ELEVENLABS_VOICE_ID is used).
         tts_url = f"{modal_base}/tts"
+        payload = {"text": text}
+        voice_id_env = (os.environ.get("ELEVENLABS_VOICE_ID") or "").strip()
+        if voice_id_env:
+            payload["voice_id"] = voice_id_env
+            print(f"[tts] Modal TTS with voice_id from .env: {voice_id_env[:8]}...")
+        else:
+            print("[tts] Modal TTS with no voice_id (Modal will use its default)")
         try:
             async with httpx.AsyncClient(timeout=15.0) as http_client:
-                r = await http_client.post(tts_url, json={"text": text})
+                r = await http_client.post(tts_url, json=payload)
         except Exception as e:
             print(f"[tts] Modal TTS request failed: {e}")
             r = None
