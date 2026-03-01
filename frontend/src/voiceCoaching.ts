@@ -177,8 +177,8 @@ export class VoiceCoach {
       return;
     }
 
-    // Prefer ElevenLabs TTS when configured
-    if (this.config.ttsEnabled && this.config.apiBase) {
+    // Prefer ElevenLabs TTS when configured (apiBase can be empty – we use relative /api/tts then)
+    if (this.config.ttsEnabled) {
       this.speakViaElevenLabs(message.trim());
       return;
     }
@@ -201,7 +201,7 @@ export class VoiceCoach {
 
   private speakViaElevenLabs(text: string): void {
     const base = (this.config.apiBase || "").replace(/\/$/, "");
-    const url = `${base}/api/tts`;
+    const url = base ? `${base}/api/tts` : "/api/tts";
 
     fetch(url, {
       method: "POST",

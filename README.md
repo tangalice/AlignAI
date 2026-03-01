@@ -75,14 +75,17 @@ Reference video pose extraction (YouTube, API, AI-generated) runs faster on Moda
 
 Without `MODAL_PREPROCESS_ENDPOINT`, the AI-generated video tab will fail (503) when extracting poses; the Exercise tab falls back to slower local/browser preprocessing.
 
-### Voice coaching (ElevenLabs, optional)
+### Voice coaching (Modal + ElevenLabs, optional)
 
-For higher-quality spoken coaching via ElevenLabs TTS, add to `.env`:
+Voice coach uses **Modal + Eleven Labs** for a coach-like voice when the Modal app is deployed.
 
-- `ELEVENLABS_API_KEY` – your [ElevenLabs](https://elevenlabs.io) API key (backend only; never sent to the frontend).
-- `ELEVENLABS_VOICE_ID` – optional; default is `21m00Tcm4TlvDq8ikWAM` (Rachel).
+1. **Deploy the Modal app** (includes TTS): `modal deploy modal_video_app`
+2. **Add `ELEVENLABS_API_KEY` to the Modal secret** `formai-video-keys` (same secret as Perplexity/xAI). In Modal dashboard: Secrets → formai-video-keys → add `ELEVENLABS_API_KEY` with your [ElevenLabs](https://elevenlabs.io) API key.
+3. **Set `MODAL_VIDEO_GENERATE_ENDPOINT`** in `.env` to your Modal app URL (e.g. `https://your-workspace--formai-video-fastapi-app.modal.run`).
 
-The backend proxies TTS at `POST /api/tts`. When the key is set, the frontend automatically uses ElevenLabs for coaching voice; otherwise it falls back to browser speech synthesis. The Voice coach label shows "· ElevenLabs" when enabled.
+The backend proxies TTS at `POST /api/tts` to Modal’s `/tts` endpoint, which uses Eleven Labs with a **coach-style voice** (Adam by default). Optional: set `ELEVENLABS_VOICE_ID` in the Modal secret to override the voice.
+
+If Modal is not configured, you can still use direct ElevenLabs by setting `ELEVENLABS_API_KEY` (and optionally `ELEVENLABS_VOICE_ID`) in `.env`; the backend will call ElevenLabs directly. The Voice coach label shows "· ElevenLabs" when enabled.
 
 ### AI coaching (optional)
 

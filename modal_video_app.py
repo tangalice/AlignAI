@@ -1,13 +1,16 @@
 """
 Modal app: Perplexity (research + final video prompt) -> xAI video -> store -> SSE progress + download.
+Also: Eleven Labs TTS for voice coach (coach-like voice).
 
 Endpoints:
   POST /generate            (text/event-stream)
   GET  /download/{gen_id}   (video/mp4)
+  POST /tts                 (JSON { "text": "..." } -> audio/mpeg)
 
 Modal Secret (name: formai-video-keys):
   PERPLEXITY_API_KEY
   XAI_API_KEY
+  ELEVENLABS_API_KEY        (for TTS; optional ELEVENLABS_VOICE_ID for coach voice)
 """
 
 import json
@@ -195,6 +198,63 @@ async def generate(request: Request):
         stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
+# Eleven Labs TTS default: natural/conversational. Override with ELEVENLABS_VOICE_ID in Modal secret.
+# Natural: Rachel 21m00Tcm4TlvDq8ikWAM, Bella EXAVITQu4vr4xnSDxMaL. Coach: Adam pNInz6obpgDQGcFmaJgB, Josh TxGEqnHWrfWFTfGW9XjX.
+ELEVENLABS_DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"  # Rachel – calm, conversational
+
+
+@api.post("/tts")
+async def tts(request: Request):
+    """Convert text to speech via Eleven Labs; returns MP3. Default voice: natural/conversational (override with ELEVENLABS_VOICE_ID in secret)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    text = (body.get("text") or "").strip()
+    if not text:
+        return Response(
+            content=json.dumps({"error": "text is required"}),
+            media_type="application/json",
+            status_code=400,
+        )
+    api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    if not api_key:
+        return Response(
+            content=json.dumps({"error": "ELEVENLABS_API_KEY not set"}),
+            media_type="application/json",
+            status_code=503,
+        )
+    voice_id = os.environ.get("ELEVENLABS_VOICE_ID", ELEVENLABS_DEFAULT_VOICE_ID).strip()
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    params = {"output_format": "mp3_22050_32"}
+    payload = {"text": text, "model_id": "eleven_multilingual_v2"}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                url,
+                params=params,
+                json=payload,
+                headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+            )
+    except Exception as e:
+        return Response(
+            content=json.dumps({"error": f"ElevenLabs request failed: {e}"}),
+            media_type="application/json",
+            status_code=502,
+        )
+    if r.status_code != 200:
+        return Response(
+            content=json.dumps({"error": f"ElevenLabs error: {r.status_code} {r.text[:200]}"}),
+            media_type="application/json",
+            status_code=502,
+        )
+    return Response(
+        content=r.content,
+        media_type="audio/mpeg",
+        headers={"Content-Length": str(len(r.content))},
     )
 
 

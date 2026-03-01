@@ -588,32 +588,69 @@ class TTSRequest(BaseModel):
     text: str
 
 
-# ElevenLabs TTS: set ELEVENLABS_API_KEY in env to enable.
+# ElevenLabs TTS default: more natural/conversational (override with ELEVENLABS_VOICE_ID).
+# Natural-sounding premade IDs: Rachel 21m00Tcm4TlvDq8ikWAM, Bella EXAVITQu4vr4xnSDxMaL,
+# Josh TxGEqnHWrfWFTfGW9XjX (energetic), Adam pNInz6obpgDQGcFmaJgB (authoritative coach).
+ELEVENLABS_DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"  # Rachel – calm, conversational
 
 
 def _get_elevenlabs_api_key() -> str:
     return (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
 
 
+def _get_modal_tts_base() -> str:
+    """Base URL for Modal TTS (same app as video). Empty if not set."""
+    base = (os.environ.get("MODAL_VIDEO_GENERATE_ENDPOINT") or "").strip().strip('"\'')
+    if base and not base.startswith(("http://", "https://")):
+        base = "https://" + base
+    return base.rstrip("/") if base else ""
+
+
 @app.get("/api/tts/config")
 async def tts_config() -> JSONResponse:
-    """Return whether ElevenLabs TTS is available (so frontend can prefer it)."""
-    return JSONResponse(content={"enabled": bool(_get_elevenlabs_api_key())})
+    """Return whether ElevenLabs TTS is available (Modal or direct). Frontend prefers it over browser TTS."""
+    modal_base = _get_modal_tts_base()
+    return JSONResponse(content={
+        "enabled": bool(_get_elevenlabs_api_key()) or bool(modal_base),
+    })
 
 
 @app.post("/api/tts")
 async def tts_convert(request: Request, body: TTSRequest) -> StreamingResponse:
-    """Convert text to speech via ElevenLabs; returns MP3 audio."""
+    """Convert text to speech via Modal + ElevenLabs (coach voice) or direct ElevenLabs; returns MP3."""
     client = getattr(request, "client", None)
     if client and not _check_rate_limit(client.host or "unknown"):
         raise HTTPException(status_code=429, detail="Too many requests. Please wait a moment.")
-    api_key = _get_elevenlabs_api_key()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="ElevenLabs TTS not configured (set ELEVENLABS_API_KEY)")
-    voice_id = os.environ.get("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM").strip()
     text = (body.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
+
+    modal_base = _get_modal_tts_base()
+    api_key = _get_elevenlabs_api_key()
+
+    if modal_base:
+        # Prefer Modal TTS (Eleven Labs with coach-like voice; API key lives in Modal secret).
+        tts_url = f"{modal_base}/tts"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as http_client:
+                r = await http_client.post(tts_url, json={"text": text})
+        except Exception as e:
+            print(f"[tts] Modal TTS request failed: {e}")
+            r = None
+        if r and r.status_code == 200:
+            print(f"[tts] ok (Modal) text={text[:60]!r} len={len(r.content)}")
+            return StreamingResponse(
+                io.BytesIO(r.content),
+                media_type="audio/mpeg",
+                headers={"Content-Length": str(len(r.content))},
+            )
+        if r:
+            print(f"[tts] Modal TTS error status={r.status_code}, falling back to direct ElevenLabs")
+
+    # Direct ElevenLabs (when Modal not used or Modal failed; uses coach voice by default).
+    if not api_key:
+        raise HTTPException(status_code=503, detail="TTS not configured (set MODAL_VIDEO_GENERATE_ENDPOINT or ELEVENLABS_API_KEY)")
+    voice_id = os.environ.get("ELEVENLABS_VOICE_ID", ELEVENLABS_DEFAULT_VOICE_ID).strip()
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     params = {"output_format": "mp3_22050_32"}
     payload = {"text": text, "model_id": "eleven_multilingual_v2"}
@@ -1122,6 +1159,9 @@ Use formal medical/fitness terminology. Be concise but thorough. Format for a he
                 "alert": body.reason,
             },
         )
+
+
+@app.post("/api/compare-pose")
 async def compare_pose(body: ComparePoseRequest) -> JSONResponse:
     """Log pose comparison score and coaching feedback from frontend."""
     parts = [f"video_t={body.video_t}", f"score={body.score:.3f}"]
