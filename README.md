@@ -30,7 +30,7 @@ pip install -r requirements.txt
 python pose_server.py
 ```
 
-Runs at `http://localhost:8001`. For the Exercise tab, set `YMOVE_API_KEY` (get a key at [ymove.app/exercise-api/signup](https://ymove.app/exercise-api/signup)).
+Runs at `http://localhost:8001`. Copy `.env.example` to `.env` and add your API keys. For the Exercise tab, set `YMOVE_API_KEY` (get a key at [ymove.app/exercise-api/signup](https://ymove.app/exercise-api/signup)).
 
 ### Frontend
 

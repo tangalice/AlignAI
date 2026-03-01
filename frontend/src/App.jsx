@@ -162,7 +162,7 @@ function App() {
       setExerciseSearchLoading(true);
       setExerciseSearchSuggestions([]);
       try {
-        const res = await fetch(`${apiBase}/api/exercises/search?q=${encodeURIComponent(q)}&limit=15`, { signal });
+        const res = await fetch(`${apiBase}/api/exercises/search?q=${encodeURIComponent(q)}&limit=15&quick=1`, { signal });
         const data = await res.json();
         setExerciseResults(data.exercises || []);
         setExerciseSearchSuggestions(data.suggestions || []);
@@ -830,6 +830,50 @@ function App() {
       setWorkoutSummaryLoading(false);
     }
   };
+
+  const handleRetrySummary = useCallback(async () => {
+    const samples = workoutSamplesRef.current;
+    const startedAt = workoutStartedAtRef.current;
+    const durationSec = startedAt != null ? performance.now() / 1000 - startedAt : null;
+    if (!samples.length) return;
+    setWorkoutSummaryError(null);
+    setWorkoutSummaryLoading(true);
+    try {
+      const res = await fetch(`${apiBase}/api/workout/summary`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          exercise_name: referenceExerciseName || "",
+          exercise_muscle: referenceExerciseMuscle || "",
+          duration_sec: durationSec,
+          reps: repCountRef.current || undefined,
+          samples: samples.map((s) => ({
+            video_t: s.video_t,
+            score: s.score,
+            limbScores: s.limbScores,
+            feedback: s.feedback,
+          })),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Summary request failed");
+      const summary = data.summary || "Your workout was recorded.";
+      setWorkoutSummary(summary);
+      const updated = saveWorkoutToHistory({
+        exercise: referenceExerciseName,
+        muscle: referenceExerciseMuscle,
+        summary,
+        durationSec,
+        reps: repCountRef.current,
+      });
+      setWorkoutHistory(updated);
+    } catch (err) {
+      setWorkoutSummaryError(err.message || "Could not generate summary");
+      setWorkoutSummary(null);
+    } finally {
+      setWorkoutSummaryLoading(false);
+    }
+  }, [apiBase, referenceExerciseName, referenceExerciseMuscle]);
 
   useEffect(() => {
     if (!isStreaming || !isModelReady) return;
@@ -1537,7 +1581,10 @@ function App() {
               </>
             )}
             {workoutSummaryError && !workoutSummaryLoading && (
-              <div className="workout-summary-error">{workoutSummaryError}</div>
+              <div className="workout-summary-error">
+                {workoutSummaryError}
+                <button type="button" className="btn-retry" onClick={handleRetrySummary}>Retry</button>
+              </div>
             )}
           </section>
         )}

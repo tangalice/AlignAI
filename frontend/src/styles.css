@@ -864,6 +864,25 @@ body {
   padding: 12px 0;
   font-size: 0.95rem;
   color: #f87171;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.btn-retry {
+  padding: 6px 14px;
+  font-size: 0.9rem;
+  background: rgba(63, 176, 255, 0.2);
+  color: #3fb0ff;
+  border: 1px solid rgba(63, 176, 255, 0.4);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-retry:hover {
+  background: rgba(63, 176, 255, 0.3);
 }
 
 .workout-reps {

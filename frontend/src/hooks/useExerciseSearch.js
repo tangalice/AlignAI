@@ -54,7 +54,7 @@ export function useExerciseSearch(apiBase, query, activeTab) {
 
       try {
         const res = await fetch(
-          `${apiBase}/api/exercises/search?q=${encodeURIComponent(q)}&limit=15`,
+          `${apiBase}/api/exercises/search?q=${encodeURIComponent(q)}&limit=15&quick=1`,
           { signal }
         );
         const data = await res.json();

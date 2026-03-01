@@ -786,13 +786,13 @@ async def llm_coaching(request: Request, body: LLMCoachingRequest) -> JSONRespon
     ]
     if body.worst_limb:
         limb_label = body.worst_limb.replace("_", " ")
-        context_parts.append(f" Primary issue: {limb_label}.")
+        context_parts.append(f" PRIMARY ISSUE TO ADDRESS: {limb_label}.")
+    if body.feedback_message:
+        context_parts.append(f" Generic cue from pose comparison: {body.feedback_message}")
+    if worst_limbs:
+        context_parts.append(f" Other weak areas: {', '.join(w.replace('_', ' ') for w in worst_limbs)}.")
     if body.temporal_trend:
         context_parts.append(f" Trend: form is {body.temporal_trend} over the last few seconds.")
-    if body.feedback_message:
-        context_parts.append(f" Generic feedback: {body.feedback_message}")
-    if worst_limbs:
-        context_parts.append(f" Lowest-scoring limbs: {', '.join(w.replace('_', ' ') for w in worst_limbs)}.")
 
     # Supermemory RAG: fetch exercise form cues + user's past workout context
     rag_context = ""
@@ -804,16 +804,16 @@ async def llm_coaching(request: Request, body: LLMCoachingRequest) -> JSONRespon
 
     context = "".join(context_parts).strip() + rag_context
 
-    system_prompt = """You are a concise fitness coach who knows this user over time. The user is mirroring an exercise demo. Only give feedback for SUBSTANTIAL form errors—major differences, not minor tweaks.
+    system_prompt = """You are a concise fitness coach. The user is mirroring an exercise demo. Give feedback ONLY for the PRIMARY issue—the worst limb or body part mentioned in the context.
 
-If you have context about this user's past workouts (areas they've worked on, recurring issues, progress), you may briefly reference it to personalize—e.g. "Keep working on tucking those elbows" if that's been a theme.
+RULES:
+- Base your tip on the specific limb/body part flagged (worst_limb, lowest-scoring limbs). Do not invent new issues.
+- Use the generic feedback as a starting point but make it more actionable. If it says "raise left arm", say "Raise your left arm to shoulder height" or similar.
+- Be concrete: name the body part and what to do. Examples: "Tuck your elbows in", "Keep your knee over your ankle", "Straighten your back—avoid rounding".
+- NEVER say vague things like "adjust slightly" or "move a little". Be specific.
+- Keep the tip under 12 words. Reply with ONLY the tip, no preamble or quotes."""
 
-DO NOT say things like "move slightly higher" or "adjust a little". Only speak when the difference is large and obvious.
-Examples of GOOD feedback (major issues): "Your elbows are flaring out—tuck them in", "Your back is rounding", "Your arms need to be much higher to match the demo", "Keep your knee over your ankle—it's caving in".
-Examples of BAD feedback (too minor): "Raise your arm a bit", "Slight adjustment needed", "Move your elbow a little".
-
-Give ONE short tip (under 12 words). Be direct. Reply with ONLY the tip, no preamble or quotes."""
-
+    fallback = body.feedback_message or "Adjust your form to match the demo."
     try:
         from openai import AsyncOpenAI
 
@@ -825,32 +825,31 @@ Give ONE short tip (under 12 words). Be direct. Reply with ONLY the tip, no prea
                 {"role": "user", "content": context},
             ],
             max_tokens=50,
-            temperature=0.6,
+            temperature=0.3,
         )
-        msg = (r.choices[0].message.content or "").strip()
+        if r.choices and len(r.choices) > 0:
+            msg = (r.choices[0].message.content or "").strip()
+        else:
+            msg = ""
         if not msg:
-            msg = body.feedback_message or "Adjust your form to match the demo."
+            msg = fallback
         return JSONResponse(content={"message": msg})
     except Exception as e:
         err_msg = str(e)
         print(f"[llm-coaching] error: {err_msg}")
-        fallback = body.feedback_message or "Adjust your form to match the demo."
-        return JSONResponse(
-            status_code=502,
-            content={"error": err_msg, "message": fallback},
-        )
+        return JSONResponse(content={"message": fallback})
 
 
 @app.post("/api/workout/summary")
 async def workout_summary(request: Request, body: WorkoutSummaryRequest) -> JSONResponse:
-    """Generate an AI summary of a workout session from accumulated pose comparison samples. Uses Perplexity API only."""
+    """Generate an AI summary of a workout session. Uses Perplexity API if set, else falls back to OpenAI."""
     client = getattr(request, "client", None)
     if client and not _check_rate_limit(client.host or "unknown"):
         raise HTTPException(status_code=429, detail="Too many requests. Please wait a moment.")
-    if not PPLX_API_KEY:
+    if not PPLX_API_KEY and not OPENAI_API_KEY:
         return JSONResponse(
             status_code=503,
-            content={"error": "PPLX_API_KEY not set. Add it to .env and restart the server.", "summary": None},
+            content={"error": "PPLX_API_KEY or OPENAI_API_KEY required for summaries. Add one to .env and restart.", "summary": None},
         )
 
     samples = body.samples or []
@@ -903,11 +902,12 @@ Format as readable paragraphs, no bullet points or headers unless you want one s
     try:
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(
-            api_key=PPLX_API_KEY,
-            base_url="https://api.perplexity.ai",
-        )
-        model = "llama-3.1-sonar-small-128k-online"
+        if PPLX_API_KEY:
+            client = AsyncOpenAI(api_key=PPLX_API_KEY, base_url="https://api.perplexity.ai")
+            model = "llama-3.1-sonar-small-128k-online"
+        else:
+            client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+            model = "gpt-4o-mini"
         r = await client.chat.completions.create(
             model=model,
             messages=[
@@ -917,7 +917,9 @@ Format as readable paragraphs, no bullet points or headers unless you want one s
             max_tokens=400,
             temperature=0.7,
         )
-        summary = (r.choices[0].message.content or "").strip()
+        summary = ""
+        if r.choices and len(r.choices) > 0:
+            summary = (r.choices[0].message.content or "").strip()
         if not summary:
             summary = "Your workout session was recorded. Keep practicing to improve your form!"
 
@@ -1014,7 +1016,12 @@ If they mention pain, injury, or concerning symptoms, gently suggest they consul
             max_tokens=300,
             temperature=0.7,
         )
-        return (r.choices[0].message.content or "").strip()
+        reply = ""
+        if r.choices and len(r.choices) > 0:
+            reply = (r.choices[0].message.content or "").strip()
+        if not reply:
+            reply = "I'm here to help with your workouts. Could you try asking again?"
+        return reply
 
     try:
         reply = await asyncio.wait_for(_do_chat(), timeout=25.0)
@@ -1072,11 +1079,20 @@ Use formal medical/fitness terminology. Be concise but thorough. Format for a he
             max_tokens=800,
             temperature=0.3,
         )
-        report = (r.choices[0].message.content or "").strip()
+        report = ""
+        if r.choices and len(r.choices) > 0:
+            report = (r.choices[0].message.content or "").strip()
+        if not report:
+            report = "Unable to generate report. Your progress data is available in the app."
         return JSONResponse(content={"report": report, "alert": body.reason})
     except Exception as e:
         print(f"[coach-pt-report] error: {e}")
-        return JSONResponse(status_code=502, content={"report": "", "error": str(e)})
+        return JSONResponse(
+            content={
+                "report": "Sorry, the report couldn't be generated. Try again or check your connection.",
+                "alert": body.reason,
+            },
+        )
 async def compare_pose(body: ComparePoseRequest) -> JSONResponse:
     """Log pose comparison score and coaching feedback from frontend."""
     parts = [f"video_t={body.video_t}", f"score={body.score:.3f}"]
