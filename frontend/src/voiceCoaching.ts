@@ -193,8 +193,8 @@ export class VoiceCoach {
   }
 }
 
-// Same threshold as AI coach – unified checkpoint
-const COACH_SCORE_THRESHOLD = 0.9;
+// Only coach when form error is substantial (score < 0.75)
+const COACH_SCORE_THRESHOLD = 0.75;
 
 // ---------------------------------------------------------------------------
 // Engine — processes frames and fires coaching speech

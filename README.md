@@ -73,7 +73,21 @@ The backend proxies TTS at `POST /api/tts`. If the key is not set, coaching fall
 
 ### AI coaching (optional)
 
-For smarter, contextual coaching feedback, set `OPENAI_API_KEY`. When enabled, the app will call GPT-4o-mini to generate short, actionable form tips (e.g. "Bring your elbow closer to your body") instead of generic "Adjust your arm" messages. The AI coaching toggle appears next to the Voice coach toggle when the key is configured.
+For smarter, contextual coaching feedback, set `OPENAI_API_KEY`. When enabled, the app will call GPT-4o-mini to generate short, actionable form tips (e.g. "Bring your elbow closer to your body") instead of generic "Adjust your arm" messages. Voice coach uses the LLM output exclusively (no voice when the LLM call fails).
+
+### Supermemory (optional – RAG for form guides)
+
+[Supermemory](https://supermemory.ai/) powers retrieval-augmented coaching: the LLM gets relevant form cues from an exercise knowledge base before generating tips.
+
+1. **Set `SUPERMEMORY_API_KEY`** in `.env` (get one at [console.supermemory.ai](https://console.supermemory.ai/start)).
+2. **Seed the knowledge base** with exercise guides:
+   ```bash
+   python seed_supermemory_exercises.py
+   ```
+   This adds form cues and ExRx.net URLs to the `formai_exercises` container. Indexing takes 10–30 seconds.
+3. When an exercise is selected, its name and video URL are added to Supermemory for better RAG context.
+
+The Voice coach label shows "(with form guides)" when Supermemory is configured.
 
 ### Pose compare (local)
 

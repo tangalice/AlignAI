@@ -164,6 +164,7 @@ export function scorePoseSimilarity(
 
   const weightedMean = totalWeight > 0 ? weightedSum / totalWeight : 0;
   let score = (weightedMean + 1) / 2; // map [-1,1] → [0,1]
+  score = Math.pow(Math.max(0, score), SCORE_STRICTNESS);
 
   // Exponential smoothing
   const alpha = options?.alpha ?? 0.3;
@@ -217,7 +218,10 @@ export function comparePose(reference: PoseFrame, live: PoseFrame): CompareResul
 const LIMB_FEEDBACK_THRESHOLD = 0.85; // below this = limb is "off"
 
 /** Margin from frame edge (0–1) for visibility. Points outside are considered out of frame. */
-const FRAME_MARGIN = 0.05;
+const FRAME_MARGIN = 0.08;
+
+/** Stricter scoring: raw score is raised to this power. Higher = stricter (e.g. 0.8^1.4 ≈ 0.74). */
+const SCORE_STRICTNESS = 1.4;
 
 /** Upper-body muscle groups: arms and torso matter, legs don't. */
 const UPPER_MUSCLES = new Set([
@@ -255,6 +259,27 @@ const LIMB_INDICES: Record<string, [number, number]> = {
 function isPointInFrame(p: Vec3): boolean {
   const x = p[0], y = p[1];
   return x >= FRAME_MARGIN && x <= 1 - FRAME_MARGIN && y >= FRAME_MARGIN && y <= 1 - FRAME_MARGIN;
+}
+
+/** Returns true if the user's core (torso) is in frame. If false, score should be 0. */
+function isUserInFrame(landmarks: Vec3[]): boolean {
+  const hipMid: Vec3 = [
+    (landmarks[LEFT_HIP][0] + landmarks[RIGHT_HIP][0]) / 2,
+    (landmarks[LEFT_HIP][1] + landmarks[RIGHT_HIP][1]) / 2,
+    (landmarks[LEFT_HIP][2] + landmarks[RIGHT_HIP][2]) / 2,
+  ];
+  const shoulderMid: Vec3 = [
+    (landmarks[LEFT_SHOULDER][0] + landmarks[RIGHT_SHOULDER][0]) / 2,
+    (landmarks[LEFT_SHOULDER][1] + landmarks[RIGHT_SHOULDER][1]) / 2,
+    (landmarks[LEFT_SHOULDER][2] + landmarks[RIGHT_SHOULDER][2]) / 2,
+  ];
+  const hipsOk = landmarks[LEFT_HIP][0] >= 0 && landmarks[LEFT_HIP][0] <= 1 &&
+    landmarks[RIGHT_HIP][0] >= 0 && landmarks[RIGHT_HIP][0] <= 1;
+  const shouldersOk = landmarks[LEFT_SHOULDER][0] >= 0 && landmarks[LEFT_SHOULDER][0] <= 1 &&
+    landmarks[RIGHT_SHOULDER][0] >= 0 && landmarks[RIGHT_SHOULDER][0] <= 1;
+  const inBounds = (p: Vec3) => p[0] >= FRAME_MARGIN && p[0] <= 1 - FRAME_MARGIN &&
+    p[1] >= FRAME_MARGIN && p[1] <= 1 - FRAME_MARGIN;
+  return inBounds(hipMid) && inBounds(shoulderMid) && (hipsOk || shouldersOk);
 }
 
 /** Returns true if both endpoints of the limb are in frame. Legs often cut off in upper-body framing. */
@@ -335,14 +360,30 @@ export function comparePoseWithCoaching(
     };
   }
 
-  const { score, limbScores: scores } = scorePoseSimilarity(reference, live);
   const liveNorm = live.landmarks as Vec3[];
 
-  for (const [limb, s] of Object.entries(scores)) {
-    const visible = isLimbVisible(liveNorm, limb);
-    const relevant = isLimbRelevantForExercise(limb, exerciseMuscle);
-    limbScores[limb] = visible && relevant ? s : 1; // mask out invisible/irrelevant
+  if (!isUserInFrame(liveNorm)) {
+    return {
+      score: 0,
+      feedback: { joint: "frame", message: "Limbs not in frame" },
+      limbScores: {},
+    };
   }
+
+  const { score, limbScores: scores } = scorePoseSimilarity(reference, live);
+
+  let totalWeight = 0;
+  let weightedSum = 0;
+  for (const limb of LIMBS_JW) {
+    const s = scores[limb.name] ?? 1;
+    const visible = isLimbVisible(liveNorm, limb.name);
+    const relevant = isLimbRelevantForExercise(limb.name, exerciseMuscle);
+    const final = relevant ? (visible ? Math.pow(Math.max(0, s), SCORE_STRICTNESS) : 0) : 1;
+    limbScores[limb.name] = final;
+    totalWeight += limb.weight;
+    weightedSum += final * limb.weight;
+  }
+  const score = totalWeight > 0 ? weightedSum / totalWeight : 0;
 
   let worstLimb: string | null = null;
   let worstScore = 1;

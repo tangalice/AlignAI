@@ -378,6 +378,14 @@ class LLMCoachingRequest(BaseModel):
     worst_limb: Optional[str] = None
     exercise_name: Optional[str] = None
     exercise_muscle: Optional[str] = None
+    temporal_trend: Optional[str] = None  # "improving" | "worsening" | null
+
+
+class SupermemoryAddExerciseRequest(BaseModel):
+    exercise_name: str
+    exercise_muscle: Optional[str] = None
+    video_url: Optional[str] = None
+    exercise_id: Optional[str] = None
 
 
 class WorkoutSample(BaseModel):
@@ -570,12 +578,85 @@ async def tts_convert(body: TTSRequest) -> StreamingResponse:
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 PPLX_API_KEY = os.environ.get("PPLX_API_KEY", "").strip()
+SUPERMEMORY_API_KEY = os.environ.get("SUPERMEMORY_API_KEY", "").strip()
+SUPERMEMORY_CONTAINER = "formai_exercises"
+
+
+async def _supermemory_search(q: str, limit: int = 3) -> list[str]:
+    """Search Supermemory for exercise form cues. Returns list of relevant text chunks."""
+    if not SUPERMEMORY_API_KEY:
+        return []
+    try:
+        from supermemory import AsyncSupermemory
+
+        client = AsyncSupermemory(api_key=SUPERMEMORY_API_KEY)
+        results = await client.search.documents(
+            q=q,
+            container_tags=[SUPERMEMORY_CONTAINER],
+            limit=limit,
+        )
+        chunks = []
+        for r in results.results:
+            text = getattr(r, "chunk", None) or getattr(r, "memory", None) or getattr(r, "content", None)
+            if text and isinstance(text, str):
+                chunks.append(text.strip())
+        return chunks[:limit]
+    except Exception as e:
+        print(f"[supermemory] search error: {e}")
+        return []
+
+
+async def _supermemory_add(content: str, custom_id: str) -> bool:
+    """Add content to Supermemory. Returns True on success."""
+    if not SUPERMEMORY_API_KEY:
+        return False
+    try:
+        from supermemory import AsyncSupermemory
+
+        client = AsyncSupermemory(api_key=SUPERMEMORY_API_KEY)
+        await client.add(
+            content=content,
+            container_tags=[SUPERMEMORY_CONTAINER],
+            custom_id=custom_id,
+        )
+        return True
+    except Exception as e:
+        print(f"[supermemory] add error: {e}")
+        return False
+
+
+@app.post("/api/supermemory/add-exercise")
+async def supermemory_add_exercise(body: SupermemoryAddExerciseRequest) -> JSONResponse:
+    """Add exercise context to Supermemory for RAG. Called when user selects an exercise."""
+    if not SUPERMEMORY_API_KEY:
+        return JSONResponse(content={"ok": False, "error": "SUPERMEMORY_API_KEY not set"})
+    name = (body.exercise_name or "").strip()
+    if not name:
+        return JSONResponse(content={"ok": False, "error": "exercise_name required"})
+    muscle = (body.exercise_muscle or "").strip()
+    custom_id = f"exercise_{body.exercise_id or name.lower().replace(' ', '_')}"
+    added = []
+    if body.video_url:
+        ok = await _supermemory_add(body.video_url, f"{custom_id}_video")
+        if ok:
+            added.append("video")
+    desc = f"Exercise: {name}"
+    if muscle:
+        desc += f" (muscle: {muscle})"
+    desc += ". Form cues: match the demo's arm and leg positions, keep core braced, control the movement."
+    ok = await _supermemory_add(desc, f"{custom_id}_desc")
+    if ok:
+        added.append("desc")
+    return JSONResponse(content={"ok": len(added) > 0, "added": added})
 
 
 @app.get("/api/coaching/llm/config")
 async def llm_coaching_config() -> JSONResponse:
     """Check if LLM coaching is available (OPENAI_API_KEY set)."""
-    return JSONResponse(content={"enabled": bool(OPENAI_API_KEY)})
+    return JSONResponse(content={
+        "enabled": bool(OPENAI_API_KEY),
+        "supermemory": bool(SUPERMEMORY_API_KEY),
+    })
 
 
 @app.post("/api/coaching/llm")
@@ -590,29 +671,46 @@ async def llm_coaching(body: LLMCoachingRequest) -> JSONResponse:
     score_pct = round(body.score * 100)
     worst_limbs = (
         sorted(
-            (k for k, v in (body.limbScores or {}).items() if isinstance(v, (int, float)) and v < 0.85),
+            (k for k, v in (body.limbScores or {}).items() if isinstance(v, (int, float)) and v < 0.75),
             key=lambda k: body.limbScores.get(k, 1),
         )[:3]
     )
+    worst_limb_score = 1.0
+    if body.worst_limb and body.limbScores:
+        worst_limb_score = body.limbScores.get(body.worst_limb, 1.0)
+
     context_parts = [
         f"Exercise: {body.exercise_name or 'unknown'}",
         f" (target muscle: {body.exercise_muscle})" if body.exercise_muscle else "",
-        f". Form score: {score_pct}%.",
+        f". Form score: {score_pct}%. Worst limb score: {round(worst_limb_score * 100)}%.",
     ]
     if body.worst_limb:
         limb_label = body.worst_limb.replace("_", " ")
         context_parts.append(f" Primary issue: {limb_label}.")
+    if body.temporal_trend:
+        context_parts.append(f" Trend: form is {body.temporal_trend} over the last few seconds.")
     if body.feedback_message:
         context_parts.append(f" Generic feedback: {body.feedback_message}")
     if worst_limbs:
         context_parts.append(f" Lowest-scoring limbs: {', '.join(w.replace('_', ' ') for w in worst_limbs)}.")
 
-    context = "".join(context_parts).strip()
+    # Supermemory RAG: fetch exercise form cues when available
+    rag_context = ""
+    if body.exercise_name or body.worst_limb:
+        search_q = f"{body.exercise_name or 'exercise'} form cues {body.worst_limb or ''}".strip()
+        chunks = await _supermemory_search(search_q, limit=3)
+        if chunks:
+            rag_context = "\n\nRelevant form guidance:\n" + "\n".join(f"- {c}" for c in chunks)
 
-    system_prompt = """You are a concise fitness coach. The user is doing form comparison against an exercise demo. 
-Give ONE short, actionable tip (under 12 words) to fix the form issue. Be specific to the limb/area mentioned. 
-Use plain language. Examples: "Bring your elbow closer to your body", "Straighten your back", "Keep your knee over your ankle".
-Reply with ONLY the tip, no preamble or quotes."""
+    context = "".join(context_parts).strip() + rag_context
+
+    system_prompt = """You are a concise fitness coach. The user is mirroring an exercise demo. Only give feedback for SUBSTANTIAL form errors—major differences, not minor tweaks.
+
+DO NOT say things like "move slightly higher" or "adjust a little". Only speak when the difference is large and obvious.
+Examples of GOOD feedback (major issues): "Your elbows are flaring out—tuck them in", "Your back is rounding", "Your arms need to be much higher to match the demo", "Keep your knee over your ankle—it's caving in".
+Examples of BAD feedback (too minor): "Raise your arm a bit", "Slight adjustment needed", "Move your elbow a little".
+
+Give ONE short tip (under 12 words). Be direct. Reply with ONLY the tip, no preamble or quotes."""
 
     try:
         from openai import AsyncOpenAI

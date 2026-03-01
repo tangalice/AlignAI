@@ -87,8 +87,14 @@ function App() {
   useEffect(() => {
     fetch(`${apiBase}/api/coaching/llm/config`)
       .then((r) => r.json())
-      .then((d) => setLlmCoachingAvailable(Boolean(d.enabled)))
-      .catch(() => setLlmCoachingAvailable(false));
+      .then((d) => {
+        setLlmCoachingAvailable(Boolean(d.enabled));
+        setSupermemoryEnabled(Boolean(d.supermemory));
+      })
+      .catch(() => {
+        setLlmCoachingAvailable(false);
+        setSupermemoryEnabled(false);
+      });
   }, [apiBase]);
 
   // Search exercises (debounced, AbortController cancels stale requests)
@@ -150,6 +156,16 @@ function App() {
       setReferenceExerciseMuscle((exercise.muscle || "").toLowerCase());
       setReferenceExerciseName(exercise.name || "");
       setExerciseSearchQuery("");
+      fetch(`${apiBase}/api/supermemory/add-exercise`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          exercise_name: exercise.name,
+          exercise_muscle: exercise.muscle,
+          video_url: data.video_url,
+          exercise_id: exercise.id,
+        }),
+      }).catch(() => {});
     } catch (err) {
       if (err.name === "AbortError") return;
       setPreprocessError(err.message || "Could not find exercise video. Try another exercise.");
@@ -550,6 +566,9 @@ function App() {
   const workoutStartedAtRef = useRef(null);
   const workoutActiveRef = useRef(false);
   workoutActiveRef.current = workoutActive;
+  const poseHistoryRef = useRef([]); // Rolling window: { score, worstLimb, worstScore }
+  const temporalTrendRef = useRef(null); // "improving" | "worsening" | null
+  const [supermemoryEnabled, setSupermemoryEnabled] = useState(false);
 
   useEffect(() => {
     if (!isStreaming || !isModelReady) return;
@@ -696,11 +715,34 @@ function App() {
               compareScoreRef.current = score100;
               setComparisonScore(score100);
               setCoachingFeedback(feedback);
+
+              const worstLimb = feedback?.joint ?? null;
+              const worstScore = worstLimb ? (limbScores[worstLimb] ?? 1) : 1;
+              const history = poseHistoryRef.current;
+              history.push({ score, worstLimb, worstScore });
+              if (history.length > 30) history.shift();
+              if (history.length >= 10 && worstLimb) {
+                const half = Math.floor(history.length / 2);
+                const recent = history.slice(-half).filter((h) => h.worstLimb === worstLimb);
+                const older = history.slice(0, half).filter((h) => h.worstLimb === worstLimb);
+                if (recent.length >= 3 && older.length >= 3) {
+                  const recentAvg = recent.reduce((a, h) => a + h.worstScore, 0) / recent.length;
+                  const olderAvg = older.reduce((a, h) => a + h.worstScore, 0) / older.length;
+                  const diff = recentAvg - olderAvg;
+                  temporalTrendRef.current = diff > 0.03 ? "improving" : diff < -0.03 ? "worsening" : null;
+                } else {
+                  temporalTrendRef.current = null;
+                }
+              } else {
+                temporalTrendRef.current = null;
+              }
+              const worstScoreForLimb = worstLimb ? (limbScores[worstLimb] ?? 1) : 1;
+              const substantialError = score < 0.75 && worstScoreForLimb < 0.75;
               if (voiceCoachOnRef.current && voiceCoachingRef.current) {
                 const willFetchLlm =
                   llmCoachingAvailableRef.current &&
                   feedback?.message &&
-                  score < 0.9 &&
+                  substantialError &&
                   now - lastLlmFetchMsRef.current >= 5000;
                 voiceCoachingRef.current.onFrame(
                   { score, limbScores, feedback },
@@ -710,7 +752,7 @@ function App() {
               if (
                 llmCoachingAvailableRef.current &&
                 feedback?.message &&
-                score < 0.9 &&
+                substantialError &&
                 now - lastLlmFetchMsRef.current >= 5000
               ) {
                 lastLlmFetchMsRef.current = now;
@@ -724,16 +766,18 @@ function App() {
                     worst_limb: feedback.joint,
                     exercise_name: referenceExerciseName,
                     exercise_muscle: referenceExerciseMuscle,
+                    temporal_trend: temporalTrendRef.current,
                   }),
                 })
-                  .then((r) => r.json())
-                  .then((d) => {
+                  .then(async (r) => {
+                    const d = await r.json();
                     if (d.message) {
                       setCoachingFeedback({ joint: feedback.joint, message: d.message });
-                      if (voiceCoachOnRef.current && voiceCoachingRef.current?.speak) {
+                      if (r.ok && voiceCoachOnRef.current && voiceCoachingRef.current?.speak) {
                         voiceCoachingRef.current.speak(d.message);
                       }
                     }
+                    return d;
                   })
                   .catch(() => {});
               }
@@ -757,11 +801,17 @@ function App() {
               compareScoreRef.current = null;
               setComparisonScore(null);
               setCoachingFeedback(null);
+              poseHistoryRef.current = [];
+              temporalTrendRef.current = null;
             }
           } else {
             compareScoreRef.current = null;
             setComparisonScore(null);
-            if (activeTab === "youtube") setCoachingFeedback(null);
+            if (activeTab === "youtube") {
+              setCoachingFeedback(null);
+              poseHistoryRef.current = [];
+              temporalTrendRef.current = null;
+            }
           }
         }
       }
@@ -1233,7 +1283,7 @@ function App() {
                 onChange={(e) => setVoiceCoachOn(e.target.checked)}
                 aria-label="Toggle voice coaching"
               />
-              <span>Voice coach</span>
+              <span>Voice coach{supermemoryEnabled ? " (with form guides)" : ""}</span>
             </label>
             {activeTab === "youtube" && ytVideoSrc && (
               <div className="workout-actions">
