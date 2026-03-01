@@ -2,6 +2,11 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { PoseLandmarker, FilesetResolver, DrawingUtils } from "@mediapipe/tasks-vision";
 import { comparePoseWithCoaching } from "./comparePose";
 import { startVoiceCoaching } from "./voiceCoaching";
+import { Toast } from "./components/Toast";
+import { ExerciseSearch } from "./components/ExerciseSearch";
+import { useExerciseSearch } from "./hooks/useExerciseSearch";
+import { loadWorkoutHistory, saveWorkoutToHistory, clearWorkoutHistory } from "./hooks/useWorkoutHistory";
+import { CoachPanel } from "./components/CoachPanel";
 
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
@@ -28,6 +33,7 @@ function getYouTubeVideoId(url) {
 }
 
 function App() {
+  const apiBase = import.meta.env.VITE_API_BASE || "";
   const videoRef = useRef(null);
   const outputCanvasRef = useRef(null);
   const poseLandmarkerRef = useRef(null);
@@ -37,11 +43,9 @@ function App() {
   const [referenceExerciseMuscle, setReferenceExerciseMuscle] = useState("");
   const [referenceExerciseName, setReferenceExerciseName] = useState("");
   const [exerciseSearchQuery, setExerciseSearchQuery] = useState("");
-  const [exerciseResults, setExerciseResults] = useState([]);
-  const [exerciseSearchSuggestions, setExerciseSearchSuggestions] = useState([]);
-  const [exerciseSearchLoading, setExerciseSearchLoading] = useState(false);
   const [exerciseSearchFocused, setExerciseSearchFocused] = useState(false);
   const [exerciseVideoLoading, setExerciseVideoLoading] = useState(false);
+  const [toast, setToast] = useState(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isModelReady, setIsModelReady] = useState(false);
   const [error, setError] = useState(null);
@@ -63,9 +67,14 @@ function App() {
   const [workoutSummaryLoading, setWorkoutSummaryLoading] = useState(false);
   const [workoutSummaryError, setWorkoutSummaryError] = useState(null);
   const [isPastedYoutubeShort, setIsPastedYoutubeShort] = useState(false);
+  const [workoutHistory, setWorkoutHistory] = useState(() => loadWorkoutHistory());
+  const [repCount, setRepCount] = useState(0);
 
   // Tabs: "youtube" | "ai"
   const [activeTab, setActiveTab] = useState("youtube");
+  const [supermemoryEnabled, setSupermemoryEnabled] = useState(false);
+
+  const { results: exerciseResults, suggestions: exerciseSearchSuggestions, loading: exerciseSearchLoading, error: exerciseSearchError } = useExerciseSearch(apiBase, exerciseSearchQuery, activeTab);
   const [aiDescription, setAiDescription] = useState("");
   const [aiVideoUrl, setAiVideoUrl] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
@@ -77,20 +86,26 @@ function App() {
   const [aiSpeed, setAiSpeed] = useState(1);
   const [aiStage, setAiStage] = useState("");
   const [aiProgressText, setAiProgressText] = useState("");
-  const [aiPercent, setAiPercent] = useState(0);  
+  const [aiPercent, setAiPercent] = useState(0);
   const [aiGenId, setAiGenId] = useState(null);
+  const [aiPreprocessLoading, setAiPreprocessLoading] = useState(false);
+  const [aiPreprocessError, setAiPreprocessError] = useState(null);
+  const [aiPreprocessReady, setAiPreprocessReady] = useState(false);
 
   const ytVideoRef = useRef(null);
+  const aiVideoBlobRef = useRef(null);
+  const aiReferenceFramesRef = useRef(null);
   const aiVideoRef = useRef(null);
   const ytProgressIntervalRef = useRef(null);
   const ytSkeletonCanvasRef = useRef(null);
 
-  const apiBase = import.meta.env.VITE_API_BASE || "";
   const ytVideoSrc = referenceVideoUrl || null;
   const isYoutubeVideo = Boolean(
     referenceVideoUrl && String(referenceVideoUrl).includes("/api/youtube/")
   );
   const youtubeVideoIdFromUrl = referenceVideoUrl?.match(/\/api\/youtube\/([^/?#]+)/)?.[1] ?? null;
+
+  const [ttsEnabled, setTtsEnabled] = useState(false);
 
   useEffect(() => {
     fetch(`${apiBase}/api/coaching/llm/config`)
@@ -98,10 +113,12 @@ function App() {
       .then((d) => {
         setLlmCoachingAvailable(Boolean(d.enabled));
         setSupermemoryEnabled(Boolean(d.supermemory));
+        setTtsEnabled(Boolean(d.tts));
       })
       .catch(() => {
         setLlmCoachingAvailable(false);
         setSupermemoryEnabled(false);
+        setTtsEnabled(false);
       });
   }, [apiBase]);
 
@@ -173,14 +190,13 @@ function App() {
     exerciseVideoAbortRef.current = new AbortController();
     const signal = exerciseVideoAbortRef.current.signal;
     setExerciseVideoLoading(true);
-    setReferenceVideoUrl("");
-    setReferenceExerciseId(null);
-    setReferenceExerciseMuscle("");
-    setReferenceExerciseName("");
-    setPreprocessError(null);
-    setPreprocessResult(null);
-    setExerciseSearchFocused(false);
-    setExerciseResults([]);
+      setReferenceVideoUrl("");
+      setReferenceExerciseId(null);
+      setReferenceExerciseMuscle("");
+      setReferenceExerciseName("");
+      setPreprocessError(null);
+      setPreprocessResult(null);
+      setExerciseSearchFocused(false);
     try {
       const res = await fetch(`${apiBase}/api/exercises/video?id=${encodeURIComponent(exercise.id)}`, { signal });
       const data = await res.json();
@@ -200,7 +216,7 @@ function App() {
           video_url: data.video_url,
           exercise_id: exercise.id,
         }),
-      }).catch(() => {});
+      }).catch((e) => console.warn("[supermemory] add-exercise failed:", e));
     } catch (err) {
       if (err.name === "AbortError") return;
       setPreprocessError(err.message || "Could not find exercise video. Try another exercise.");
@@ -237,26 +253,25 @@ function App() {
         const text = await res.text();
         throw new Error(text || `Request failed (${res.status})`);
       }
-  
       const reader = res.body.getReader();
       const decoder = new TextDecoder("utf-8");
       let buffer = "";
       let genId = null;
-  
+
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-  
+
         buffer += decoder.decode(value, { stream: true });
-  
+
         // parse SSE frames split by blank line
         const parts = buffer.split("\n\n");
         buffer = parts.pop() || "";
-  
+
         for (const part of parts) {
           const line = part.split("\n").find((l) => l.startsWith("data: "));
           if (!line) continue;
-  
+
           const jsonStr = line.slice(6);
           let evt;
           try {
@@ -264,37 +279,41 @@ function App() {
           } catch {
             continue;
           }
-  
+
           if (evt.type === "genId") {
             genId = evt.id;
           }
-  
+
           if (evt.type === "progress") {
             setAiPercent(evt.percent ?? 0);
             setAiProgressText(evt.phase ? `${evt.phase}…` : "Working…");
           }
-  
+
           if (evt.type === "synthesis") {
             setAiProgressText("Generating video…");
           }
-  
+
           if (evt.type === "error") {
             throw new Error(evt.message || "Generation failed");
           }
-  
+
           if (evt.type === "done") {
             genId = evt.id || genId;
           }
         }
       }
-  
+
       if (!genId) throw new Error("No generation id returned.");
-  
+
       // Download mp4 from YOUR server (FastAPI), not directly from Modal
       const videoRes = await fetch(`${apiBase}/api/ai-video/download/${genId}`);
       if (!videoRes.ok) throw new Error(await videoRes.text());
-  
+
       const blob = await videoRes.blob();
+      aiVideoBlobRef.current = blob;
+      aiReferenceFramesRef.current = null;
+      setAiPreprocessError(null);
+      setAiPreprocessReady(false);
       const url = URL.createObjectURL(blob);
       setAiVideoUrl(url);
       setAiProgressText("Done!");
@@ -312,6 +331,32 @@ function App() {
       if (aiVideoUrl) URL.revokeObjectURL(aiVideoUrl);
     };
   }, [aiVideoUrl]);
+
+  // Extract poses from AI-generated video via Modal (fast) when video is ready
+  useEffect(() => {
+    if (!aiVideoUrl || !aiVideoBlobRef.current || aiPreprocessLoading) return;
+    const blob = aiVideoBlobRef.current;
+    setAiPreprocessLoading(true);
+    setAiPreprocessError(null);
+    const formData = new FormData();
+    formData.append("file", blob, "ai-workout.mp4");
+    fetch(`${apiBase}/api/preprocess/video?sample_fps=8`, {
+      method: "POST",
+      body: formData,
+    })
+      .then(async (r) => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || data.error || "Preprocess failed");
+        aiReferenceFramesRef.current = data.frames ?? null;
+        setAiPreprocessReady(Boolean(data.frames?.length));
+      })
+      .catch((err) => {
+        setAiPreprocessError(err.message || "Could not extract poses");
+        setAiPreprocessReady(false);
+        aiReferenceFramesRef.current = null;
+      })
+      .finally(() => setAiPreprocessLoading(false));
+  }, [aiVideoUrl, apiBase]);
 
   // Sync playback rate and volume when video element or state changes
   useEffect(() => {
@@ -429,6 +474,31 @@ function App() {
       setPreprocessError("Select an exercise first.");
       return;
     }
+    // Try API preprocess first (Modal GPU) when we have a fetchable URL
+    if (referenceVideoUrl.startsWith("http://") || referenceVideoUrl.startsWith("https://")) {
+      setPreprocessLoading(true);
+      setPreprocessError(null);
+      setPreprocessResult(null);
+      try {
+        const res = await fetch(`${apiBase}/api/preprocess`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: referenceVideoUrl, sample_fps: 8 }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          setPreprocessResult(JSON.stringify({ source_url: referenceVideoUrl, frames: data.frames }));
+          setPreprocessLoading(false);
+          return;
+        }
+        throw new Error(data.detail || data.error || "Preprocess failed");
+      } catch (err) {
+        setPreprocessLoading(false);
+        setPreprocessError(err.message || "API preprocess failed. Trying browser…");
+        // Fall through to in-browser preprocess
+      }
+    }
+
     const video = ytVideoRef.current;
     if (!video) {
       setPreprocessError("Load the exercise video first.");
@@ -545,7 +615,7 @@ function App() {
       }
       setPreprocessLoading(false);
     }
-  }, [referenceVideoUrl]);
+  }, [referenceVideoUrl, apiBase]);
 
   useEffect(() => {
     let stream;
@@ -669,16 +739,21 @@ function App() {
   workoutActiveRef.current = workoutActive;
   const poseHistoryRef = useRef([]); // Rolling window: { score, worstLimb, worstScore }
   const temporalTrendRef = useRef(null); // "improving" | "worsening" | null
-  const [supermemoryEnabled, setSupermemoryEnabled] = useState(false);
+  const repStateRef = useRef({ phase: "high", lastRepAt: 0 });
+  const repCountRef = useRef(0);
+  repCountRef.current = repCount;
 
   useEffect(() => {
     if (!isStreaming || !isModelReady) return;
-    voiceCoachingRef.current = startVoiceCoaching(() => {});
+    voiceCoachingRef.current = startVoiceCoaching(() => {}, {
+      apiBase,
+      ttsEnabled,
+    });
     return () => {
       if (voiceCoachingRef.current) voiceCoachingRef.current.reset();
       voiceCoachingRef.current = null;
     };
-  }, [isStreaming, isModelReady]);
+  }, [isStreaming, isModelReady, apiBase, ttsEnabled]);
 
   useEffect(() => {
     if (activeTab !== "youtube" && voiceCoachingRef.current) {
@@ -695,9 +770,11 @@ function App() {
   const handleStartWorkout = () => {
     workoutSamplesRef.current = [];
     workoutStartedAtRef.current = performance.now() / 1000;
+    repStateRef.current = { phase: "high", lastRepAt: 0 };
     setWorkoutActive(true);
     setWorkoutSummary(null);
     setWorkoutSummaryError(null);
+    setRepCount(0);
     const video = ytVideoRef.current;
     if (video) video.play().catch(() => {});
   };
@@ -725,6 +802,7 @@ function App() {
           exercise_name: referenceExerciseName || "",
           exercise_muscle: referenceExerciseMuscle || "",
           duration_sec: durationSec,
+          reps: repCountRef.current || undefined,
           samples: samples.map((s) => ({
             video_t: s.video_t,
             score: s.score,
@@ -735,7 +813,16 @@ function App() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Summary request failed");
-      setWorkoutSummary(data.summary || "Your workout was recorded.");
+      const summary = data.summary || "Your workout was recorded.";
+      setWorkoutSummary(summary);
+      const updated = saveWorkoutToHistory({
+        exercise: referenceExerciseName,
+        muscle: referenceExerciseMuscle,
+        summary,
+        durationSec,
+        reps: repCountRef.current,
+      });
+      setWorkoutHistory(updated);
     } catch (err) {
       setWorkoutSummaryError(err.message || "Could not generate summary");
       setWorkoutSummary(null);
@@ -794,15 +881,14 @@ function App() {
         const now = performance.now();
         if (now - lastCompareMsRef.current >= 1000 / 15) {
           lastCompareMsRef.current = now;
-          const refs = referenceFramesRef.current;
-          const ytVideo = ytVideoRef.current;
+          const refs = activeTab === "youtube" ? referenceFramesRef.current : aiReferenceFramesRef.current;
+          const refVideo = activeTab === "youtube" ? ytVideoRef.current : aiVideoRef.current;
           if (
-            activeTab === "youtube" &&
             refs?.length &&
-            ytVideo &&
-            Number.isFinite(ytVideo.currentTime)
+            refVideo &&
+            Number.isFinite(refVideo.currentTime)
           ) {
-            const videoT = ytVideo.currentTime;
+            const videoT = refVideo.currentTime;
             const closest = refs.reduce((a, b) =>
               Math.abs(a.t - videoT) <= Math.abs(b.t - videoT) ? a : b
             );
@@ -880,7 +966,7 @@ function App() {
                     }
                     return d;
                   })
-                  .catch(() => {});
+                  .catch((e) => console.warn("[llm-coaching] fetch failed:", e));
               }
               if (now - lastFetchMsRef.current >= 500) {
                 lastFetchMsRef.current = now;
@@ -888,7 +974,7 @@ function App() {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ video_t: videoT, score, limbScores, feedback }),
-                }).catch(() => {});
+                }).catch((e) => console.warn("[compare-pose] fetch failed:", e));
               }
               if (workoutActiveRef.current && workoutSamplesRef.current.length < 500) {
                 workoutSamplesRef.current.push({
@@ -898,6 +984,16 @@ function App() {
                   feedback: feedback ? { joint: feedback.joint, message: feedback.message } : undefined,
                 });
               }
+              const rs = repStateRef.current;
+              if (workoutActiveRef.current && rs) {
+                const minRepGap = 0.8;
+                if (rs.phase === "high" && score < 0.65) rs.phase = "dipped";
+                else if (rs.phase === "dipped" && score > 0.82 && now / 1000 - rs.lastRepAt >= minRepGap) {
+                  rs.phase = "high";
+                  rs.lastRepAt = now / 1000;
+                  setRepCount((c) => c + 1);
+                } else if (rs.phase === "dipped" && score > 0.82) rs.phase = "high";
+              }
             } else {
               compareScoreRef.current = null;
               setComparisonScore(null);
@@ -905,15 +1001,13 @@ function App() {
               poseHistoryRef.current = [];
               temporalTrendRef.current = null;
             }
-          } else {
-            compareScoreRef.current = null;
-            setComparisonScore(null);
-            if (activeTab === "youtube") {
+            } else {
+              compareScoreRef.current = null;
+              setComparisonScore(null);
               setCoachingFeedback(null);
               poseHistoryRef.current = [];
               temporalTrendRef.current = null;
             }
-          }
         }
       }
 
@@ -1376,8 +1470,13 @@ function App() {
           </div>
           <div className="comparison-display">
             {comparisonScore != null && comparisonScore >= 0 ? (
-              <div className="comparison-score" style={{ color: scoreToColors(comparisonScore).primary }}>
-                Match: {comparisonScore}%
+              <div className="comparison-score-row">
+                <span className="comparison-score" style={{ color: scoreToColors(comparisonScore).primary }}>
+                  Match: {comparisonScore}%
+                </span>
+                {workoutActive && (
+                  <span className="rep-count">Reps: {repCount}</span>
+                )}
               </div>
             ) : activeTab === "youtube" && ytVideoSrc && (
               <div className={`comparison-hint ${preprocessError ? "error" : ""}`}>
@@ -1386,6 +1485,17 @@ function App() {
                   : preprocessError
                     ? preprocessError
                     : "Play the video and mirror the pose to see your score."}
+              </div>
+            )}
+            {activeTab === "ai" && aiVideoUrl && (
+              <div className={`comparison-hint ${aiPreprocessError ? "error" : ""}`}>
+                {aiPreprocessLoading
+                  ? "Extracting reference poses…"
+                  : aiPreprocessError
+                    ? aiPreprocessError
+                    : aiPreprocessReady
+                      ? "Play the video and mirror the pose to see your score."
+                      : "Extracting reference poses…"}
               </div>
             )}
             {coachingFeedback && (
@@ -1398,7 +1508,7 @@ function App() {
                 onChange={(e) => setVoiceCoachOn(e.target.checked)}
                 aria-label="Toggle voice coaching"
               />
-              <span>Voice coach{supermemoryEnabled ? " (with form guides)" : ""}</span>
+              <span>Voice coach{supermemoryEnabled ? " (with form guides)" : ""}{ttsEnabled ? " · ElevenLabs" : ""}</span>
             </label>
             {activeTab === "youtube" && ytVideoSrc && (
               <div className="workout-actions">
@@ -1421,11 +1531,32 @@ function App() {
             <h2>Workout summary</h2>
             {workoutSummaryLoading && <div className="workout-summary-loading">Generating your AI summary…</div>}
             {workoutSummary && !workoutSummaryLoading && (
-              <div className="workout-summary-content">{workoutSummary}</div>
+              <>
+                <div className="workout-summary-content">{workoutSummary}</div>
+                {repCount > 0 && <div className="workout-reps">Reps completed: {repCount}</div>}
+              </>
             )}
             {workoutSummaryError && !workoutSummaryLoading && (
               <div className="workout-summary-error">{workoutSummaryError}</div>
             )}
+          </section>
+        )}
+
+        {workoutHistory.length > 0 && activeTab === "youtube" && (
+          <section className="panel workout-history-panel">
+            <h2>Workout history</h2>
+            <ul className="workout-history-list">
+              {workoutHistory.slice(0, 10).map((entry) => (
+                <li key={entry.id} className="workout-history-item">
+                  <span className="workout-history-date">{new Date(entry.date).toLocaleDateString()}</span>
+                  <span className="workout-history-exercise">{entry.exercise}</span>
+                  {entry.reps > 0 && <span className="workout-history-reps">{entry.reps} reps</span>}
+                </li>
+              ))}
+            </ul>
+            <button type="button" className="btn-clear-history" onClick={() => { clearWorkoutHistory(); setWorkoutHistory([]); }}>
+              Clear history
+            </button>
           </section>
         )}
       </main>
@@ -1444,6 +1575,10 @@ function App() {
           <span>{error}</span>
         </div>
       )}
+
+      <Toast message={toast} onDismiss={() => setToast(null)} type="error" />
+
+      <CoachPanel />
     </div>
   );
 }

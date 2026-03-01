@@ -1,6 +1,6 @@
 /**
- * Low-latency browser-only voice coaching engine.
- * Uses Web Speech API (SpeechSynthesis). Zero backend TTS.
+ * Voice coaching engine. Uses ElevenLabs TTS (backend) when enabled,
+ * otherwise falls back to Web Speech API (SpeechSynthesis).
  *
  * Auto-unlocks on first click/touch/keydown — no button needed.
  */
@@ -155,9 +155,21 @@ const MESSAGES: Record<LimbGroup, { soft: string[]; strong: string[] }> = {
   },
 };
 
+export interface VoiceCoachConfig {
+  apiBase?: string;
+  ttsEnabled?: boolean;
+}
+
 export class VoiceCoach {
+  private config: VoiceCoachConfig = {};
+  private currentAudio: HTMLAudioElement | null = null;
+
+  constructor(config?: VoiceCoachConfig) {
+    this.config = config || {};
+  }
+
   speak(message: string): void {
-    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    if (typeof window === "undefined") return;
     if (!message.trim()) return;
 
     if (!_unlocked) {
@@ -165,6 +177,14 @@ export class VoiceCoach {
       return;
     }
 
+    // Prefer ElevenLabs TTS when configured
+    if (this.config.ttsEnabled && this.config.apiBase) {
+      this.speakViaElevenLabs(message.trim());
+      return;
+    }
+
+    // Fallback to Web Speech API
+    if (!window.speechSynthesis) return;
     const synth = window.speechSynthesis;
     synth.cancel();
 
@@ -176,10 +196,56 @@ export class VoiceCoach {
     if (_defaultVoice) u.voice = _defaultVoice;
     synth.speak(u);
 
-    console.log("[VoiceCoach] speaking:", message.trim());
+    console.log("[VoiceCoach] speaking (browser):", message.trim());
+  }
+
+  private speakViaElevenLabs(text: string): void {
+    const base = (this.config.apiBase || "").replace(/\/$/, "");
+    const url = `${base}/api/tts`;
+
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`TTS ${r.status}`);
+        return r.blob();
+      })
+      .then((blob) => {
+        const audioUrl = URL.createObjectURL(blob);
+        const audio = new Audio(audioUrl);
+        this.currentAudio = audio;
+        audio.onended = () => {
+          URL.revokeObjectURL(audioUrl);
+          if (this.currentAudio === audio) this.currentAudio = null;
+        };
+        audio.onerror = (e) => {
+          console.warn("[VoiceCoach] ElevenLabs play failed:", e);
+          URL.revokeObjectURL(audioUrl);
+          if (this.currentAudio === audio) this.currentAudio = null;
+        };
+        audio.play();
+        console.log("[VoiceCoach] speaking (ElevenLabs):", text.slice(0, 50) + (text.length > 50 ? "…" : ""));
+      })
+      .catch((e) => {
+        console.warn("[VoiceCoach] ElevenLabs fetch failed:", e);
+        // Fallback to browser speech
+        if (typeof window !== "undefined" && window.speechSynthesis) {
+          const u = new SpeechSynthesisUtterance(text);
+          u.lang = "en-US";
+          if (_defaultVoice) u.voice = _defaultVoice;
+          window.speechSynthesis.speak(u);
+          console.log("[VoiceCoach] fallback to browser speech");
+        }
+      });
   }
 
   cancel(): void {
+    if (this.currentAudio) {
+      this.currentAudio.pause();
+      this.currentAudio = null;
+    }
     if (typeof window !== "undefined" && window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
@@ -201,8 +267,8 @@ const COACH_SCORE_THRESHOLD = 0.75;
 // Uses comparePose feedback as single source of truth when provided.
 // ---------------------------------------------------------------------------
 
-export function createVoiceCoachingEngine() {
-  const voice = new VoiceCoach();
+export function createVoiceCoachingEngine(config?: VoiceCoachConfig) {
+  const voice = new VoiceCoach(config);
   let lastSpokenAt = 0;
 
   function processFrame(data: FrameScoreData, options?: { deferToLlm?: boolean }): VoiceCoachingOutput {
@@ -243,8 +309,11 @@ export function createVoiceCoachingEngine() {
   };
 }
 
-export function startVoiceCoaching(onFrameScore: (data: FrameScoreData) => void) {
-  const engine = createVoiceCoachingEngine();
+export function startVoiceCoaching(
+  onFrameScore: (data: FrameScoreData) => void,
+  config?: VoiceCoachConfig
+) {
+  const engine = createVoiceCoachingEngine(config);
 
   function onFrame(data: FrameScoreData, options?: { deferToLlm?: boolean }): void {
     onFrameScore(data);

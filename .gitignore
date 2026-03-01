@@ -5,3 +5,4 @@ __pycache__/
 frontend/node_modules/
 *.pt
 yolov8n-pose.pt
+data/progress.json

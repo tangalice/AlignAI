@@ -16,7 +16,10 @@ LEFT_HIP, RIGHT_HIP = 23, 24
 LEFT_KNEE, RIGHT_KNEE = 25, 26
 LEFT_ANKLE, RIGHT_ANKLE = 27, 28
 
+# Exercise-specific landmark weights (higher = more important for that exercise).
+# YMove muscle groups: chest, back, shoulders, biceps, triceps, quads, hamstrings, glutes, calves, core, full_body
 EXERCISE_WEIGHTS: dict[str, dict[int, float]] = {
+    # Lower body
     "squat": {
         LEFT_KNEE: 1.5, RIGHT_KNEE: 1.5,
         LEFT_HIP: 1.3, RIGHT_HIP: 1.3,
@@ -26,6 +29,24 @@ EXERCISE_WEIGHTS: dict[str, dict[int, float]] = {
         LEFT_KNEE: 1.5, RIGHT_KNEE: 1.5,
         LEFT_HIP: 1.2, RIGHT_HIP: 1.2,
     },
+    "deadlift": {
+        LEFT_HIP: 1.4, RIGHT_HIP: 1.4,
+        LEFT_KNEE: 1.2, RIGHT_KNEE: 1.2,
+        LEFT_SHOULDER: 1.0, RIGHT_SHOULDER: 1.0,
+    },
+    "leg press": {
+        LEFT_KNEE: 1.5, RIGHT_KNEE: 1.5,
+        LEFT_HIP: 1.3, RIGHT_HIP: 1.3,
+    },
+    "leg curl": {
+        LEFT_KNEE: 1.5, RIGHT_KNEE: 1.5,
+        LEFT_HIP: 1.2, RIGHT_HIP: 1.2,
+    },
+    "hip thrust": {
+        LEFT_HIP: 1.5, RIGHT_HIP: 1.5,
+        LEFT_SHOULDER: 1.0, RIGHT_SHOULDER: 1.0,
+    },
+    # Upper body – arms
     "pushup": {
         LEFT_ELBOW: 1.5, RIGHT_ELBOW: 1.5,
         LEFT_SHOULDER: 1.3, RIGHT_SHOULDER: 1.3,
@@ -34,16 +55,65 @@ EXERCISE_WEIGHTS: dict[str, dict[int, float]] = {
         LEFT_ELBOW: 1.8, RIGHT_ELBOW: 1.8,
         LEFT_SHOULDER: 1.2, RIGHT_SHOULDER: 1.2,
     },
+    "curl": {
+        LEFT_ELBOW: 1.8, RIGHT_ELBOW: 1.8,
+        LEFT_SHOULDER: 1.2, RIGHT_SHOULDER: 1.2,
+    },
+    "tricep": {
+        LEFT_ELBOW: 1.6, RIGHT_ELBOW: 1.6,
+        LEFT_SHOULDER: 1.2, RIGHT_SHOULDER: 1.2,
+    },
+    # Upper body – shoulders / chest
     "overhead": {
         LEFT_ELBOW: 1.3, RIGHT_ELBOW: 1.3,
         LEFT_SHOULDER: 1.5, RIGHT_SHOULDER: 1.5,
     },
+    "press": {
+        LEFT_ELBOW: 1.3, RIGHT_ELBOW: 1.3,
+        LEFT_SHOULDER: 1.4, RIGHT_SHOULDER: 1.4,
+    },
+    "lateral raise": {
+        LEFT_SHOULDER: 1.5, RIGHT_SHOULDER: 1.5,
+        LEFT_ELBOW: 1.2, RIGHT_ELBOW: 1.2,
+    },
+    "raise": {
+        LEFT_SHOULDER: 1.4, RIGHT_SHOULDER: 1.4,
+        LEFT_ELBOW: 1.1, RIGHT_ELBOW: 1.1,
+    },
+    # Back
+    "row": {
+        LEFT_ELBOW: 1.3, RIGHT_ELBOW: 1.3,
+        LEFT_SHOULDER: 1.3, RIGHT_SHOULDER: 1.3,
+    },
+    "pull": {
+        LEFT_ELBOW: 1.3, RIGHT_ELBOW: 1.3,
+        LEFT_SHOULDER: 1.2, RIGHT_SHOULDER: 1.2,
+    },
+    "pulldown": {
+        LEFT_ELBOW: 1.3, RIGHT_ELBOW: 1.3,
+        LEFT_SHOULDER: 1.2, RIGHT_SHOULDER: 1.2,
+    },
+    # Full body / cardio
     "jump": {
         LEFT_KNEE: 1.2, RIGHT_KNEE: 1.2,
         LEFT_HIP: 1.2, RIGHT_HIP: 1.2,
         LEFT_ANKLE: 1.0, RIGHT_ANKLE: 1.0,
     },
     "default": {},
+}
+
+# Map YMove muscle groups to exercise weight keys when name doesn't match
+MUSCLE_TO_WEIGHTS: dict[str, str] = {
+    "biceps": "curl",
+    "triceps": "tricep",
+    "shoulders": "press",
+    "chest": "pushup",
+    "back": "row",
+    "quads": "squat",
+    "hamstrings": "leg curl",
+    "glutes": "hip thrust",
+    "core": "default",
+    "full_body": "deadlift",
 }
 
 # Hit tiers for UI feedback (similar to JiggleWiggle)
@@ -121,11 +191,16 @@ def _body_normalization(landmarks: list[list[float]]) -> dict[str, float]:
     return {"shoulder_hip": shoulder_hip, "arm_length": arm_l, "torso": shoulder_hip}
 
 
-def _get_exercise_weights(exercise: str) -> dict[int, float]:
+def _get_exercise_weights(exercise: str, muscle: str = "") -> dict[int, float]:
+    """Get landmark weights for exercise. Uses name first, then muscle group fallback."""
     ex_lower = (exercise or "").lower()
+    mus_lower = (muscle or "").lower()
     for key, weights in EXERCISE_WEIGHTS.items():
         if key != "default" and key in ex_lower:
             return weights
+    if mus_lower and mus_lower in MUSCLE_TO_WEIGHTS:
+        key = MUSCLE_TO_WEIGHTS[mus_lower]
+        return EXERCISE_WEIGHTS.get(key, EXERCISE_WEIGHTS["default"])
     return EXERCISE_WEIGHTS["default"]
 
 
@@ -221,8 +296,11 @@ def _dtw(
     return path, cost[R][U]
 
 
-def compare_poses(reference: dict, user: dict, exercise: str = "") -> dict[str, Any]:
-    """Full comparison pipeline. Same logic as Modal compare."""
+def compare_poses(
+    reference: dict, user: dict, exercise: str = "", muscle: str = ""
+) -> dict[str, Any]:
+    """Full comparison pipeline. Same logic as Modal compare.
+    muscle: optional YMove muscle group (e.g. biceps, shoulders) for weight fallback."""
     ref_frames = reference.get("frames") or []
     user_frames = user.get("frames") or []
     ref_poses = _extract_pose_matrix(ref_frames)
@@ -237,7 +315,7 @@ def compare_poses(reference: dict, user: dict, exercise: str = "") -> dict[str, 
             "joint_angles_ref": {},
             "joint_angles_user": {},
         }
-    weights = _get_exercise_weights(exercise)
+    weights = _get_exercise_weights(exercise, muscle)
     path, total_cost = _dtw(ref_frames, user_frames, ref_poses, user_poses, weights)
     avg_cost = total_cost / len(path) if path else 0.0
     overall_score = max(0, min(100, round(100 - avg_cost * 250)))

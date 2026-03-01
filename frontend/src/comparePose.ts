@@ -215,32 +215,33 @@ export function comparePose(reference: PoseFrame, live: PoseFrame): CompareResul
   return { score, limbScores };
 }
 
-const LIMB_FEEDBACK_THRESHOLD = 0.85; // below this = limb is "off"
+const LIMB_FEEDBACK_THRESHOLD = 0.75; // below this = limb is "off" (was 0.85, relaxed)
 
-/** Margin from frame edge (0–1) for visibility. Points outside are considered out of frame. */
-const FRAME_MARGIN = 0.08;
+/** Margin from frame edge (0–1) for visibility. Relaxed from 0.08 so limbs at edges still count. */
+const FRAME_MARGIN = 0.03;
 
-/** Stricter scoring: raw score is raised to this power. Higher = stricter (e.g. 0.8^1.4 ≈ 0.74). */
-const SCORE_STRICTNESS = 1.4;
+/** Score power curve. 1.0 = linear; lower = more forgiving. Was 1.4, now 1.1. */
+const SCORE_STRICTNESS = 1.1;
 
-/** Upper-body muscle groups: arms and torso matter, legs don't. */
+/** Upper-body muscle groups: arms and torso matter most, legs minimal. */
 const UPPER_MUSCLES = new Set([
   "chest", "back", "shoulders", "biceps", "triceps", "forearms", "core", "abs",
   "anterior deltoid", "posterior deltoids", "deltoids", "lats", "middle back",
   "lower back", "neck", "obliques", "transverse abdominis", "rotator cuff",
 ]);
-/** Lower-body muscle groups: legs matter, arms matter less for form. */
+/** Lower-body muscle groups: legs matter most, arms minimal. */
 const LOWER_MUSCLES = new Set([
   "quadriceps", "hamstrings", "glutes", "calves", "abductors", "adductors",
   "hip flexors", "quads", "legs",
 ]);
 
-/** Limb names that are legs (excluded for upper-body exercises). */
+/** Limb names that are legs. */
 const LEG_LIMBS = new Set(["left_thigh", "right_thigh", "left_shin", "right_shin"]);
-/** Limb names that are arms (excluded for lower-body exercises). */
+/** Limb names that are arms. */
 const ARM_LIMBS = new Set([
   "left_upper_arm", "right_upper_arm", "left_forearm", "right_forearm",
 ]);
+const TORSO_LIMBS = new Set(["left_torso", "right_torso", "torso"]);
 
 /** Limb name -> [fromIdx, toIdx] for visibility check. */
 const LIMB_INDICES: Record<string, [number, number]> = {
@@ -256,30 +257,42 @@ const LIMB_INDICES: Record<string, [number, number]> = {
   right_torso: [RIGHT_SHOULDER, RIGHT_HIP],
 };
 
+/** In-frame check for limb visibility. Uses relaxed margin so limbs at edges still count. */
 function isPointInFrame(p: Vec3): boolean {
   const x = p[0], y = p[1];
   return x >= FRAME_MARGIN && x <= 1 - FRAME_MARGIN && y >= FRAME_MARGIN && y <= 1 - FRAME_MARGIN;
 }
 
-/** Returns true if the user's core (torso) is in frame. If false, score should be 0. */
-function isUserInFrame(landmarks: Vec3[]): boolean {
-  const hipMid: Vec3 = [
-    (landmarks[LEFT_HIP][0] + landmarks[RIGHT_HIP][0]) / 2,
-    (landmarks[LEFT_HIP][1] + landmarks[RIGHT_HIP][1]) / 2,
-    (landmarks[LEFT_HIP][2] + landmarks[RIGHT_HIP][2]) / 2,
-  ];
+/** Relaxed in-frame check: x,y within expanded bounds (MediaPipe can go slightly outside 0–1). */
+function isPointInFrameRelaxed(p: Vec3): boolean {
+  const x = p[0], y = p[1];
+  return x >= -FRAME_MARGIN && x <= 1 + FRAME_MARGIN && y >= -FRAME_MARGIN && y <= 1 + FRAME_MARGIN;
+}
+
+/**
+ * Returns true if the user is sufficiently in frame. Exercise-aware:
+ * - Upper body: only shoulders need to be visible (hips often cut off)
+ * - Lower body: only hips need to be visible
+ * - Full body / unknown: shoulders OR hips visible
+ */
+function isUserInFrame(landmarks: Vec3[], exerciseMuscle: string): boolean {
   const shoulderMid: Vec3 = [
     (landmarks[LEFT_SHOULDER][0] + landmarks[RIGHT_SHOULDER][0]) / 2,
     (landmarks[LEFT_SHOULDER][1] + landmarks[RIGHT_SHOULDER][1]) / 2,
-    (landmarks[LEFT_SHOULDER][2] + landmarks[RIGHT_SHOULDER][2]) / 2,
+    0,
   ];
-  const hipsOk = landmarks[LEFT_HIP][0] >= 0 && landmarks[LEFT_HIP][0] <= 1 &&
-    landmarks[RIGHT_HIP][0] >= 0 && landmarks[RIGHT_HIP][0] <= 1;
-  const shouldersOk = landmarks[LEFT_SHOULDER][0] >= 0 && landmarks[LEFT_SHOULDER][0] <= 1 &&
-    landmarks[RIGHT_SHOULDER][0] >= 0 && landmarks[RIGHT_SHOULDER][0] <= 1;
-  const inBounds = (p: Vec3) => p[0] >= FRAME_MARGIN && p[0] <= 1 - FRAME_MARGIN &&
-    p[1] >= FRAME_MARGIN && p[1] <= 1 - FRAME_MARGIN;
-  return inBounds(hipMid) && inBounds(shoulderMid) && (hipsOk || shouldersOk);
+  const hipMid: Vec3 = [
+    (landmarks[LEFT_HIP][0] + landmarks[RIGHT_HIP][0]) / 2,
+    (landmarks[LEFT_HIP][1] + landmarks[RIGHT_HIP][1]) / 2,
+    0,
+  ];
+  const shouldersOk = isPointInFrameRelaxed(shoulderMid);
+  const hipsOk = isPointInFrameRelaxed(hipMid);
+
+  const m = exerciseMuscle.toLowerCase();
+  if (UPPER_MUSCLES.has(m)) return shouldersOk;
+  if (LOWER_MUSCLES.has(m)) return hipsOk;
+  return shouldersOk || hipsOk;
 }
 
 /** Returns true if both endpoints of the limb are in frame. Legs often cut off in upper-body framing. */
@@ -302,12 +315,35 @@ function isLimbVisible(landmarks: Vec3[], limbName: string): boolean {
   return isPointInFrame(landmarks[idx[0]]) && isPointInFrame(landmarks[idx[1]]);
 }
 
-function isLimbRelevantForExercise(limbName: string, exerciseMuscle: string): boolean {
-  if (!exerciseMuscle) return true;
+/**
+ * Returns the weight for a limb given the exercise. 0 = ignore, 1 = normal, 2 = primary focus.
+ * For biceps/triceps: arms = 2, torso = 0.3, legs = 0.
+ * For squats: legs = 2, torso = 0.5, arms = 0.
+ * For chest/back: arms + torso matter, legs = 0.
+ */
+function getLimbWeightForExercise(limbName: string, exerciseMuscle: string): number {
+  if (!exerciseMuscle) return 1;
   const m = exerciseMuscle.toLowerCase();
-  if (UPPER_MUSCLES.has(m) && LEG_LIMBS.has(limbName)) return false;
-  if (LOWER_MUSCLES.has(m) && ARM_LIMBS.has(limbName)) return false;
-  return true;
+
+  if (m === "full_body" || m === "core") return 1;
+
+  if (UPPER_MUSCLES.has(m)) {
+    if (ARM_LIMBS.has(limbName)) return 2.0;
+    if (TORSO_LIMBS.has(limbName)) return 0.5;
+    if (LEG_LIMBS.has(limbName)) return 0;
+    return 0.5;
+  }
+  if (LOWER_MUSCLES.has(m)) {
+    if (LEG_LIMBS.has(limbName)) return 2.0;
+    if (TORSO_LIMBS.has(limbName)) return 0.5;
+    if (ARM_LIMBS.has(limbName)) return 0;
+    return 0.5;
+  }
+  return 1;
+}
+
+function isLimbRelevantForExercise(limbName: string, exerciseMuscle: string): boolean {
+  return getLimbWeightForExercise(limbName, exerciseMuscle) > 0;
 }
 
 const FEEDBACK_MESSAGES: Record<string, string[]> = {
@@ -362,26 +398,32 @@ export function comparePoseWithCoaching(
 
   const liveNorm = live.landmarks as Vec3[];
 
-  if (!isUserInFrame(liveNorm)) {
+  if (!isUserInFrame(liveNorm, exerciseMuscle)) {
     return {
       score: 0,
-      feedback: { joint: "frame", message: "Limbs not in frame" },
+      feedback: { joint: "frame", message: "Step into frame so your upper body is visible" },
       limbScores: {},
     };
   }
 
-  const { score, limbScores: scores } = scorePoseSimilarity(reference, live);
+  const { limbScores: scores } = scorePoseSimilarity(reference, live);
 
   let totalWeight = 0;
   let weightedSum = 0;
   for (const limb of LIMBS_JW) {
-    const s = scores[limb.name] ?? 1;
+    const limbWeight = getLimbWeightForExercise(limb.name, exerciseMuscle);
+    if (limbWeight === 0) {
+      limbScores[limb.name] = 1;
+      continue;
+    }
+
+    const rawScore = scores[limb.name] ?? 1;
     const visible = isLimbVisible(liveNorm, limb.name);
-    const relevant = isLimbRelevantForExercise(limb.name, exerciseMuscle);
-    const final = relevant ? (visible ? Math.pow(Math.max(0, s), SCORE_STRICTNESS) : 0) : 1;
+    const strictScore = Math.pow(Math.max(0, rawScore), SCORE_STRICTNESS);
+    const final = visible ? strictScore : Math.min(1, Math.max(0.5, rawScore) * 0.9);
     limbScores[limb.name] = final;
-    totalWeight += limb.weight;
-    weightedSum += final * limb.weight;
+    totalWeight += limbWeight;
+    weightedSum += final * limbWeight;
   }
   const score = totalWeight > 0 ? weightedSum / totalWeight : 0;
 

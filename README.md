@@ -62,14 +62,27 @@ The pipeline runs on Modal: **Perplexity** (research + prompt writing) → **Gro
 
 Without `MODAL_VIDEO_DOWNLOAD_BASE` and `MODAL_VIDEO_GENERATE_ENDPOINT` or the API keys, the AI tab will show an error when you click Generate; the Exercise tab and pose demo still work if `YMOVE_API_KEY` is set.
 
+### Preprocess on Modal (recommended)
+
+Reference video pose extraction (YouTube, API, AI-generated) runs faster on Modal with GPU (YOLOv8). Compare runs locally on the backend—it's lightweight and doesn't need Modal.
+
+**Compare app** (preprocess, compare-full):
+1. `modal deploy compare.modal_compare_app`
+2. In `.env`, set:
+   - `MODAL_PREPROCESS_ENDPOINT` – e.g. `https://your-workspace--formai-compare-preprocess.modal.run` (required for AI-generated video tab; speeds up Exercise tab)
+   - `MODAL_COMPARE_FULL_ENDPOINT` – e.g. `https://your-workspace--formai-compare-compare-full.modal.run` (optional; for test_compare --full)
+3. No secrets needed. Both endpoints use a GPU (T4) for fast YOLOv8 pose detection.
+
+Without `MODAL_PREPROCESS_ENDPOINT`, the AI-generated video tab will fail (503) when extracting poses; the Exercise tab falls back to slower local/browser preprocessing.
+
 ### Voice coaching (ElevenLabs, optional)
 
-For spoken coaching that works automatically in Chrome (without requiring a user gesture), set:
+For higher-quality spoken coaching via ElevenLabs TTS, add to `.env`:
 
 - `ELEVENLABS_API_KEY` – your [ElevenLabs](https://elevenlabs.io) API key (backend only; never sent to the frontend).
 - `ELEVENLABS_VOICE_ID` – optional; default is `21m00Tcm4TlvDq8ikWAM` (Rachel).
 
-The backend proxies TTS at `POST /api/tts`. If the key is not set, coaching falls back to browser speech plus per-limb tones.
+The backend proxies TTS at `POST /api/tts`. When the key is set, the frontend automatically uses ElevenLabs for coaching voice; otherwise it falls back to browser speech synthesis. The Voice coach label shows "· ElevenLabs" when enabled.
 
 ### AI coaching (optional)
 
@@ -86,8 +99,9 @@ For smarter, contextual coaching feedback, set `OPENAI_API_KEY`. When enabled, t
    ```
    This adds form cues and ExRx.net URLs to the `formai_exercises` container. Indexing takes 10–30 seconds.
 3. When an exercise is selected, its name and video URL are added to Supermemory for better RAG context.
+4. When a workout ends, the AI summary and key feedback are saved to your **user context** so the coach develops a memory of your progress, recurring issues, and patterns over time.
 
-The Voice coach label shows "(with form guides)" when Supermemory is configured.
+The Voice coach label shows "(with form guides)" when Supermemory is configured. The coach uses both generic form cues and your past workout history to personalize feedback.
 
 ### Pose compare (local)
 
@@ -97,3 +111,28 @@ The compare model runs locally on the backend (DTW alignment, joint angles, exer
 - **POST `/api/pose/compare-full`** with `youtube_url` + `user`, or `reference` + `user` → same result
 
 Uses MediaPipe-style 33-landmark format; preprocess outputs `{ "frames": [{ "landmarks": [[x,y,z],...] }] }`.
+
+### Workout history & rep counting
+
+- **Workout history**: Completed workout summaries are saved to `localStorage` and shown in a collapsible "Workout history" section. Use "Clear history" to remove them.
+- **Rep counting**: During an active workout, reps are counted automatically by detecting when your form dips (score &lt; 65%) and returns to reference (score &gt; 82%). Reps appear next to the match score and in the workout summary.
+
+### Production
+
+- **CORS**: Set `CORS_ORIGINS` in `.env` (comma-separated URLs) to restrict allowed origins. Default is `*` for development.
+- **Rate limiting**: Expensive endpoints (TTS, LLM coaching, workout summary) are limited to 30 requests per minute per IP.
+
+### AI Coach (chatbot)
+
+A floating circular button (bottom-right) opens the **FormAI Coach** — a chatbot that knows your workout history via Supermemory. Features:
+
+- **Chat**: Ask questions about your workouts, form, or progress. Uses your saved session data for personalized answers.
+- **Progress**: Charts showing form score and reps over time. Trend analysis (improving/declining).
+- **PT Report**: When progress declines or form scores drop, generate a formal report to share with a physical therapist. Includes workout history, trends, and areas of concern. Copy to clipboard to share.
+
+Requires `OPENAI_API_KEY`. Progress data is stored in `data/progress.json` (created on first workout).
+
+### Tests
+
+- **Unit tests**: `cd frontend && npm run test`
+- **E2E tests**: `cd frontend && npm run test:e2e` (requires Playwright; starts dev server automatically)

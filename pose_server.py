@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import os
 import re
 import tempfile
@@ -16,6 +17,7 @@ try:
     os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 except ImportError:
     pass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -27,7 +29,7 @@ import yt_dlp
 import json
 from pydantic import BaseModel
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, Response
 
@@ -37,13 +39,37 @@ class AIVideoRequest(BaseModel):
 
 app = FastAPI(title="FormAI Pose Server", version="0.1.0")
 
+# CORS: use CORS_ORIGINS env for production (comma-separated), "*" for dev
+_cors_origins = os.environ.get("CORS_ORIGINS", "*").strip()
+CORS_ORIGINS = [o.strip() for o in _cors_origins.split(",") if o.strip()] if _cors_origins != "*" else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Simple in-memory rate limit for expensive endpoints (per IP)
+_rate_limit: dict[str, tuple[int, float]] = {}
+RATE_LIMIT_WINDOW = 60  # seconds
+RATE_LIMIT_MAX = 30  # requests per window
+
+
+def _check_rate_limit(client_host: str) -> bool:
+    now = time.monotonic()
+    if client_host in _rate_limit:
+        count, window_start = _rate_limit[client_host]
+        if now - window_start > RATE_LIMIT_WINDOW:
+            _rate_limit[client_host] = (1, now)
+            return True
+        if count >= RATE_LIMIT_MAX:
+            return False
+        _rate_limit[client_host] = (count + 1, window_start)
+        return True
+    _rate_limit[client_host] = (1, now)
+    return True
 
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
@@ -104,11 +130,13 @@ SEARCH_ABBREVIATIONS: dict[str, str] = {
     "rdls": "romanian deadlift",
     "bw": "bodyweight",
     "goblet": "goblet squat",
+    "curl": "bicep curl",
 }
 
 # Cache: (query, limit) -> (result_dict, expiry_time)
 _search_cache: dict[tuple[str, int], tuple[dict, float]] = {}
 SEARCH_CACHE_TTL_SEC = 300  # 5 minutes
+_MAX_SEARCH_CACHE = 300
 
 # Video URL cache: exercise_id -> (video_data_dict, expiry_time). URLs expire in 48h from YMove.
 _video_cache: dict[str, tuple[dict, float]] = {}
@@ -142,8 +170,8 @@ def _expand_search_terms(q: str) -> tuple[list[str], str | None]:
             muscle = mg
             break
     # Typo tolerance: fuzzy match to alias keys if no exact match
-    if not muscle and len(q) >= 4:
-        matches = get_close_matches(q, alias_keys, n=1, cutoff=0.75)
+    if not muscle and len(q) >= 3:
+        matches = get_close_matches(q, alias_keys, n=1, cutoff=0.6)
         if matches:
             key = matches[0]
             keywords, muscle = EXERCISE_SEARCH_ALIASES[key]
@@ -170,6 +198,17 @@ def _get_suggestions(query: str) -> list[str]:
     return [k for k in matches if k != q]
 
 
+_ymove_client: httpx.AsyncClient | None = None
+
+
+async def _get_ymove_client() -> httpx.AsyncClient:
+    """Reuse HTTP client for connection pooling to YMove."""
+    global _ymove_client
+    if _ymove_client is None:
+        _ymove_client = httpx.AsyncClient(timeout=6.0)
+    return _ymove_client
+
+
 async def _ymove_request(path: str, params: dict | None = None) -> dict:
     """Call YMove API. Requires YMOVE_API_KEY env var."""
     if not YMOVE_API_KEY:
@@ -179,8 +218,8 @@ async def _ymove_request(path: str, params: dict | None = None) -> dict:
         )
     url = f"{YMOVE_BASE}{path}"
     headers = {"X-API-Key": YMOVE_API_KEY}
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        r = await client.get(url, params=params or {}, headers=headers)
+    client = await _get_ymove_client()
+    r = await client.get(url, params=params or {}, headers=headers)
     if r.status_code == 401:
         raise HTTPException(status_code=502, detail="Invalid YMove API key")
     if r.status_code == 429:
@@ -223,24 +262,50 @@ def _rank_exercise(item: dict, query: str, muscle_hint: str | None, search_terms
     return score
 
 
+def _prefix_cache_lookup(query: str, now: float) -> dict | None:
+    """If we have a cached search for a longer query that starts with this one, return it for instant results."""
+    q = query.lower()
+    if len(q) < 2:
+        return None
+    best: tuple[str, dict] | None = None
+    for (cached_q, _), (payload, expiry) in _search_cache.items():
+        if now >= expiry:
+            continue
+        c = cached_q.lower()
+        if c.startswith(q) and len(c) > len(q):
+            if best is None or len(c) < len(best[0]):
+                best = (c, payload)
+    return best[1] if best else None
+
+
 @app.get("/api/exercises/search")
-async def exercises_search(q: str = "", limit: int = 20) -> JSONResponse:
-    """Search exercises via YMove API. Cached, with muscle-group + parallel keyword searches."""
+async def exercises_search(
+    q: str = "", limit: int = 20, quick: int = 0
+) -> JSONResponse:
+    """Search exercises via YMove API. Cached. Use ?quick=1 for smaller initial response."""
     base_params = {"hasVideo": "true", "pageSize": min(limit * 2, 50)}
     query = (q or "").strip()
     limit = min(limit, 50)
+    if quick:
+        limit = min(limit, 8)
+        base_params["pageSize"] = min(16, base_params["pageSize"])
     cache_key = (query, limit)
     now = time.monotonic()
 
-    # Check cache (skip for empty query to keep defaults fresh)
-    if query:
-        if cache_key in _search_cache:
-            cached, expiry = _search_cache[cache_key]
-            if now < expiry:
-                return JSONResponse(content=cached)
-        # Evict expired entries occasionally
-        if len(_search_cache) > 200:
-            _search_cache.clear()
+    # Exact cache hit
+    if query and cache_key in _search_cache:
+        cached, expiry = _search_cache[cache_key]
+        if now < expiry:
+            return JSONResponse(content=cached)
+
+    # Prefix cache: instant results when user is typing (e.g. "cur" → use "curl" cache)
+    if query and len(query) >= 2:
+        prefix_hit = _prefix_cache_lookup(query, now)
+        if prefix_hit:
+            return JSONResponse(content=prefix_hit)
+
+    if len(_search_cache) > _MAX_SEARCH_CACHE:
+        _search_cache.clear()
 
     if not query:
         data = await _ymove_request("/exercises", base_params)
@@ -400,14 +465,26 @@ class WorkoutSummaryRequest(BaseModel):
     exercise_name: str = ""
     exercise_muscle: str = ""
     duration_sec: Optional[float] = None
+    reps: Optional[int] = None
     samples: list[WorkoutSample] = []
+
+
+class CoachChatRequest(BaseModel):
+    message: str
+    user_id: str = "default"
+
+
+class CoachPTReportRequest(BaseModel):
+    reason: str  # "progress_declining" | "low_form_score" | "user_requested"
+    user_id: str = "default"
 
 
 class CompareRequest(BaseModel):
     """Request for Modal compare: reference and user pose sequences."""
     reference: dict  # { "frames": [{ "landmarks": [[x,y,z],...] }], ... }
     user: dict  # Same format
-    exercise: str = ""  # e.g. "squat", "pushup"
+    exercise: str = ""  # e.g. "squat", "pushup", "Bicep Curl"
+    exercise_muscle: str = ""  # Optional YMove muscle group for better weights
 
 
 class CompareFullRequest(BaseModel):
@@ -416,6 +493,7 @@ class CompareFullRequest(BaseModel):
     reference: Optional[dict] = None
     user: dict
     exercise: str = ""
+    exercise_muscle: str = ""
     sample_fps: float = 8.0
 
 
@@ -524,8 +602,11 @@ async def tts_config() -> JSONResponse:
 
 
 @app.post("/api/tts")
-async def tts_convert(body: TTSRequest) -> StreamingResponse:
+async def tts_convert(request: Request, body: TTSRequest) -> StreamingResponse:
     """Convert text to speech via ElevenLabs; returns MP3 audio."""
+    client = getattr(request, "client", None)
+    if client and not _check_rate_limit(client.host or "unknown"):
+        raise HTTPException(status_code=429, detail="Too many requests. Please wait a moment.")
     api_key = _get_elevenlabs_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="ElevenLabs TTS not configured (set ELEVENLABS_API_KEY)")
@@ -562,26 +643,59 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 PPLX_API_KEY = os.environ.get("PPLX_API_KEY", "").strip()
 SUPERMEMORY_API_KEY = os.environ.get("SUPERMEMORY_API_KEY", "").strip()
 SUPERMEMORY_CONTAINER = "formai_exercises"
+SUPERMEMORY_USER_CONTAINER = "formai_user"
 
 
-async def _supermemory_search(q: str, limit: int = 3) -> list[str]:
-    """Search Supermemory for exercise form cues. Returns list of relevant text chunks."""
+async def _supermemory_add_user(content: str, custom_id: str) -> bool:
+    """Add user-specific content to Supermemory for personalized coaching."""
+    if not SUPERMEMORY_API_KEY:
+        return False
+    try:
+        from supermemory import AsyncSupermemory
+
+        client = AsyncSupermemory(api_key=SUPERMEMORY_API_KEY)
+        await client.add(
+            content=content,
+            container_tags=[SUPERMEMORY_USER_CONTAINER],
+            custom_id=custom_id,
+        )
+        return True
+    except Exception as e:
+        print(f"[supermemory] add-user error: {e}")
+        return False
+
+
+async def _supermemory_search(
+    q: str, limit: int = 5, include_user: bool = True
+) -> list[str]:
+    """Search Supermemory for form cues and optionally user context. Returns relevant text chunks."""
     if not SUPERMEMORY_API_KEY:
         return []
     try:
         from supermemory import AsyncSupermemory
 
         client = AsyncSupermemory(api_key=SUPERMEMORY_API_KEY)
-        results = await client.search.documents(
+        chunks = []
+        per_container = max(2, limit // 2)
+        results_ex = await client.search.documents(
             q=q,
             container_tags=[SUPERMEMORY_CONTAINER],
-            limit=limit,
+            limit=per_container,
         )
-        chunks = []
-        for r in results.results:
+        for r in results_ex.results:
             text = getattr(r, "chunk", None) or getattr(r, "memory", None) or getattr(r, "content", None)
             if text and isinstance(text, str):
                 chunks.append(text.strip())
+        if include_user:
+            results_user = await client.search.documents(
+                q=q,
+                container_tags=[SUPERMEMORY_USER_CONTAINER],
+                limit=per_container,
+            )
+            for r in results_user.results:
+                text = getattr(r, "chunk", None) or getattr(r, "memory", None) or getattr(r, "content", None)
+                if text and isinstance(text, str):
+                    chunks.append(text.strip())
         return chunks[:limit]
     except Exception as e:
         print(f"[supermemory] search error: {e}")
@@ -634,16 +748,20 @@ async def supermemory_add_exercise(body: SupermemoryAddExerciseRequest) -> JSONR
 
 @app.get("/api/coaching/llm/config")
 async def llm_coaching_config() -> JSONResponse:
-    """Check if LLM coaching is available (OPENAI_API_KEY set)."""
+    """Check if LLM coaching, Supermemory, and ElevenLabs TTS are available."""
     return JSONResponse(content={
         "enabled": bool(OPENAI_API_KEY),
         "supermemory": bool(SUPERMEMORY_API_KEY),
+        "tts": bool(_get_elevenlabs_api_key()),
     })
 
 
 @app.post("/api/coaching/llm")
-async def llm_coaching(body: LLMCoachingRequest) -> JSONResponse:
+async def llm_coaching(request: Request, body: LLMCoachingRequest) -> JSONResponse:
     """Generate smarter coaching feedback via LLM. Requires OPENAI_API_KEY."""
+    client = getattr(request, "client", None)
+    if client and not _check_rate_limit(client.host or "unknown"):
+        raise HTTPException(status_code=429, detail={"error": "Too many requests", "message": body.feedback_message})
     if not OPENAI_API_KEY:
         return JSONResponse(
             status_code=503,
@@ -676,17 +794,19 @@ async def llm_coaching(body: LLMCoachingRequest) -> JSONResponse:
     if worst_limbs:
         context_parts.append(f" Lowest-scoring limbs: {', '.join(w.replace('_', ' ') for w in worst_limbs)}.")
 
-    # Supermemory RAG: fetch exercise form cues when available
+    # Supermemory RAG: fetch exercise form cues + user's past workout context
     rag_context = ""
     if body.exercise_name or body.worst_limb:
         search_q = f"{body.exercise_name or 'exercise'} form cues {body.worst_limb or ''}".strip()
-        chunks = await _supermemory_search(search_q, limit=3)
+        chunks = await _supermemory_search(search_q, limit=5, include_user=True)
         if chunks:
-            rag_context = "\n\nRelevant form guidance:\n" + "\n".join(f"- {c}" for c in chunks)
+            rag_context = "\n\nContext (form guides + user's past sessions):\n" + "\n".join(f"- {c}" for c in chunks)
 
     context = "".join(context_parts).strip() + rag_context
 
-    system_prompt = """You are a concise fitness coach. The user is mirroring an exercise demo. Only give feedback for SUBSTANTIAL form errors—major differences, not minor tweaks.
+    system_prompt = """You are a concise fitness coach who knows this user over time. The user is mirroring an exercise demo. Only give feedback for SUBSTANTIAL form errors—major differences, not minor tweaks.
+
+If you have context about this user's past workouts (areas they've worked on, recurring issues, progress), you may briefly reference it to personalize—e.g. "Keep working on tucking those elbows" if that's been a theme.
 
 DO NOT say things like "move slightly higher" or "adjust a little". Only speak when the difference is large and obvious.
 Examples of GOOD feedback (major issues): "Your elbows are flaring out—tuck them in", "Your back is rounding", "Your arms need to be much higher to match the demo", "Keep your knee over your ankle—it's caving in".
@@ -722,8 +842,11 @@ Give ONE short tip (under 12 words). Be direct. Reply with ONLY the tip, no prea
 
 
 @app.post("/api/workout/summary")
-async def workout_summary(body: WorkoutSummaryRequest) -> JSONResponse:
+async def workout_summary(request: Request, body: WorkoutSummaryRequest) -> JSONResponse:
     """Generate an AI summary of a workout session from accumulated pose comparison samples. Uses Perplexity API only."""
+    client = getattr(request, "client", None)
+    if client and not _check_rate_limit(client.host or "unknown"):
+        raise HTTPException(status_code=429, detail="Too many requests. Please wait a moment.")
     if not PPLX_API_KEY:
         return JSONResponse(
             status_code=503,
@@ -797,6 +920,40 @@ Format as readable paragraphs, no bullet points or headers unless you want one s
         summary = (r.choices[0].message.content or "").strip()
         if not summary:
             summary = "Your workout session was recorded. Keep practicing to improve your form!"
+
+        if SUPERMEMORY_API_KEY:
+            memory_content = f"""Workout session: {exercise_info}
+Date: {datetime.utcnow().strftime('%Y-%m-%d')}
+Summary: {summary}
+Areas to work on: {', '.join(w.replace('_', ' ') for w in worst_limbs) if worst_limbs else 'none'}
+Duration: {body.duration_sec or 0:.0f}s"""
+            if body.reps:
+                memory_content += f"\nReps completed: {body.reps}"
+            if unique_feedback:
+                memory_content += f"\nFeedback received during workout: {'; '.join(unique_feedback[:5])}"
+            custom_id = f"workout_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{(body.exercise_name or 'unknown').lower().replace(' ', '_')[:30]}"
+            ok = await _supermemory_add_user(memory_content, custom_id)
+            if ok:
+                print(f"[supermemory] saved workout to user context: {custom_id}")
+
+        try:
+            from progress_store import add_progress
+
+            add_progress(
+                "default",
+                date=datetime.utcnow().strftime("%Y-%m-%d"),
+                exercise=body.exercise_name or "unknown",
+                muscle=body.exercise_muscle or "",
+                avg_score=avg_score,
+                min_score=min_score,
+                max_score=max_score,
+                reps=body.reps or 0,
+                duration_sec=body.duration_sec or 0,
+                worst_limbs=worst_limbs,
+            )
+        except Exception as e:
+            print(f"[progress] save error: {e}")
+
         return JSONResponse(content={"summary": summary})
     except Exception as e:
         print(f"[workout-summary] error: {e}")
@@ -806,7 +963,120 @@ Format as readable paragraphs, no bullet points or headers unless you want one s
         )
 
 
-@app.post("/api/compare-pose")
+@app.get("/api/progress")
+async def get_progress_api(user_id: str = "default") -> JSONResponse:
+    """Get progress data for charts and trend analysis."""
+    try:
+        from progress_store import get_progress_summary
+        data = get_progress_summary(user_id)
+        return JSONResponse(content=data)
+    except Exception as e:
+        print(f"[progress] get error: {e}")
+        return JSONResponse(content={"entries": [], "trend": "unknown", "alert": None})
+
+
+@app.post("/api/coach/chat")
+async def coach_chat(request: Request, body: CoachChatRequest) -> JSONResponse:
+    """AI coach chatbot with user context from Supermemory."""
+    if not OPENAI_API_KEY:
+        return JSONResponse(status_code=503, content={"error": "OPENAI_API_KEY not set", "message": ""})
+    client = getattr(request, "client", None)
+    if client and not _check_rate_limit(client.host or "unknown"):
+        raise HTTPException(status_code=429, detail="Too many requests.")
+    msg = (body.message or "").strip()
+    if not msg:
+        return JSONResponse(content={"message": "What would you like to know about your workouts?"})
+
+    async def _do_chat():
+        search_q = f"{msg} user workout history progress form"
+        try:
+            chunks = await asyncio.wait_for(_supermemory_search(search_q, limit=6, include_user=True), timeout=8.0)
+        except asyncio.TimeoutError:
+            print("[coach-chat] supermemory search timed out, using no context")
+            chunks = []
+        rag = "\n".join(f"- {c}" for c in chunks) if chunks else "No prior context yet."
+
+        system = """You are a friendly, knowledgeable fitness coach who knows this user from their FormAI workout history. 
+You have access to their past sessions, form feedback, and progress. Be conversational, supportive, and specific.
+Reference their data when relevant. Keep responses concise (2-4 sentences unless they ask for more).
+If they mention pain, injury, or concerning symptoms, gently suggest they consult a physical therapist."""
+
+        user_content = f"Context about this user:\n{rag}\n\nUser says: {msg}"
+
+        from openai import AsyncOpenAI
+        oai = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        r = await oai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            max_tokens=300,
+            temperature=0.7,
+        )
+        return (r.choices[0].message.content or "").strip()
+
+    try:
+        reply = await asyncio.wait_for(_do_chat(), timeout=25.0)
+        return JSONResponse(content={"message": reply})
+    except asyncio.TimeoutError:
+        print("[coach-chat] request timed out")
+        return JSONResponse(status_code=504, content={"message": "I'm taking too long. Please try a shorter question."})
+    except Exception as e:
+        print(f"[coach-chat] error: {e}")
+        return JSONResponse(status_code=502, content={"message": "Sorry, I couldn't process that. Try again."})
+
+
+@app.post("/api/coach/pt-report")
+async def coach_pt_report(request: Request, body: CoachPTReportRequest) -> JSONResponse:
+    """Generate formal report for physical therapist when injury/decline detected."""
+    if not OPENAI_API_KEY:
+        return JSONResponse(status_code=503, content={"error": "OPENAI_API_KEY not set", "report": ""})
+    client = getattr(request, "client", None)
+    if client and not _check_rate_limit(client.host or "unknown"):
+        raise HTTPException(status_code=429, detail="Too many requests.")
+
+    try:
+        from progress_store import get_progress_summary, get_progress
+
+        summary = get_progress_summary(body.user_id)
+        entries = get_progress(body.user_id, limit=30)
+
+        search_q = "workout summary form feedback areas to work on"
+        chunks = await _supermemory_search(search_q, limit=8, include_user=True)
+        rag = "\n---\n".join(chunks) if chunks else "No additional context."
+
+        report_context = f"""Generate a formal Physical Therapist Referral Report.
+
+Reason for referral: {body.reason}
+User progress data (last {len(entries)} sessions):
+{json.dumps(summary, indent=2)}
+
+Recent workout context from user's history:
+{rag}
+
+Create a professional 1-2 page report with:
+1. Patient Summary (anonymous - no PII)
+2. Exercise/Form Data Overview
+3. Trend Analysis
+4. Areas of Concern
+5. Recommended Next Steps for PT Evaluation
+
+Use formal medical/fitness terminology. Be concise but thorough. Format for a healthcare professional."""
+
+        from openai import AsyncOpenAI
+        oai = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        r = await oai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": report_context}],
+            max_tokens=800,
+            temperature=0.3,
+        )
+        report = (r.choices[0].message.content or "").strip()
+        return JSONResponse(content={"report": report, "alert": body.reason})
+    except Exception as e:
+        print(f"[coach-pt-report] error: {e}")
+        return JSONResponse(status_code=502, content={"report": "", "error": str(e)})
 async def compare_pose(body: ComparePoseRequest) -> JSONResponse:
     """Log pose comparison score and coaching feedback from frontend."""
     parts = [f"video_t={body.video_t}", f"score={body.score:.3f}"]
@@ -821,13 +1091,38 @@ async def compare_pose(body: ComparePoseRequest) -> JSONResponse:
 
 @app.post("/api/preprocess")
 async def preprocess_youtube_for_supermemory(body: PreprocessRequest) -> JSONResponse:
-    """Stream YouTube video, run pose detection (GPU via YOLOv8 when available) on sampled frames."""
+    """Extract pose frames from video URL. Proxies to Modal (GPU) when MODAL_PREPROCESS_ENDPOINT is set."""
     url = (body.url or "").strip()
-    video_id = _extract_youtube_video_id(url)
-    if not video_id:
-        raise HTTPException(status_code=400, detail="A YouTube video URL is required")
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
     sample_fps = max(0.5, min(30.0, body.sample_fps))
 
+    if MODAL_PREPROCESS_ENDPOINT:
+        try:
+            payload = {"sample_fps": sample_fps}
+            if _extract_youtube_video_id(url):
+                payload["youtube_url"] = url
+            else:
+                payload["video_url"] = url
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                r = await client.post(MODAL_PREPROCESS_ENDPOINT, json=payload)
+            if r.status_code != 200:
+                err = r.json() if r.content else {}
+                raise HTTPException(
+                    status_code=r.status_code,
+                    detail=err.get("error", r.text) or "Modal preprocess failed",
+                )
+            return JSONResponse(content=r.json())
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="Preprocess timed out") from None
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Modal preprocess failed: {e}") from e
+
+    video_id = _extract_youtube_video_id(url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="A YouTube video URL is required (or set MODAL_PREPROCESS_ENDPOINT for other URLs)")
     try:
         stream_url = _get_youtube_stream_url(video_id)
         cap = cv2.VideoCapture(stream_url)
@@ -841,6 +1136,43 @@ async def preprocess_youtube_for_supermemory(body: PreprocessRequest) -> JSONRes
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Preprocess failed: {e}") from e
+
+
+@app.post("/api/preprocess/video")
+async def preprocess_video_upload(file: UploadFile = File(...), sample_fps: float = 8.0) -> JSONResponse:
+    """Extract pose frames from uploaded video (e.g. AI-generated). Proxies to Modal when MODAL_PREPROCESS_ENDPOINT is set."""
+    sample_fps = max(0.5, min(30.0, sample_fps))
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty video file")
+
+    if MODAL_PREPROCESS_ENDPOINT:
+        try:
+            import base64
+            payload = {
+                "video_base64": base64.b64encode(data).decode("ascii"),
+                "sample_fps": sample_fps,
+            }
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                r = await client.post(MODAL_PREPROCESS_ENDPOINT, json=payload)
+            if r.status_code != 200:
+                err = r.json() if r.content else {}
+                raise HTTPException(
+                    status_code=r.status_code,
+                    detail=err.get("error", r.text) or "Modal preprocess failed",
+                )
+            return JSONResponse(content=r.json())
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="Preprocess timed out") from None
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Modal preprocess failed: {e}") from e
+
+    raise HTTPException(
+        status_code=503,
+        detail="Video upload preprocess requires MODAL_PREPROCESS_ENDPOINT. Deploy: modal deploy compare.modal_compare_app",
+    )
 
 
 @app.get("/api/youtube/{video_id}")
@@ -909,6 +1241,9 @@ def _clean_url(u: str) -> str:
 
 MODAL_VIDEO_GENERATE_ENDPOINT = _clean_url(_gen)
 MODAL_VIDEO_DOWNLOAD_BASE = _clean_url(_dl)
+MODAL_COMPARE_ENDPOINT = os.environ.get("MODAL_COMPARE_ENDPOINT", "").rstrip("/")
+MODAL_COMPARE_FULL_ENDPOINT = os.environ.get("MODAL_COMPARE_FULL_ENDPOINT", "").rstrip("/")
+MODAL_PREPROCESS_ENDPOINT = os.environ.get("MODAL_PREPROCESS_ENDPOINT", "").rstrip("/")
 
 # Avoid Modal/API ASCII codec errors from smart quotes etc.
 _unicode_to_ascii = str.maketrans({
@@ -973,19 +1308,49 @@ async def ai_video_download(gen_id: str):
 
 @app.post("/api/pose/compare")
 async def pose_compare(body: CompareRequest) -> JSONResponse:
-    """Compare reference pose sequence with user pose sequence (runs locally)."""
+    """Compare reference pose sequence with user pose sequence. Runs locally (lightweight DTW)."""
     from compare.compare_core import compare_poses
     result = compare_poses(
         body.reference,
         body.user,
         (body.exercise or "").strip(),
+        (body.exercise_muscle or "").strip(),
     )
     return JSONResponse(content=result)
 
 
 @app.post("/api/pose/compare-full")
 async def pose_compare_full(body: CompareFullRequest) -> JSONResponse:
-    """Full pipeline: preprocess YouTube (if url) + compare. Runs locally."""
+    """Full pipeline: preprocess YouTube (if url) + compare.
+    Proxies to Modal if MODAL_COMPARE_FULL_ENDPOINT is set."""
+    if MODAL_COMPARE_FULL_ENDPOINT:
+        try:
+            payload = {
+                "user": body.user,
+                "exercise": (body.exercise or "").strip(),
+                "exercise_muscle": (body.exercise_muscle or "").strip(),
+                "sample_fps": body.sample_fps,
+            }
+            if body.youtube_url:
+                payload["youtube_url"] = body.youtube_url
+            if body.reference:
+                payload["reference"] = body.reference
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                r = await client.post(MODAL_COMPARE_FULL_ENDPOINT, json=payload)
+            if r.status_code != 200:
+                err = r.json() if r.content else {}
+                raise HTTPException(
+                    status_code=r.status_code,
+                    detail=err.get("error", r.text) or f"Modal compare-full returned {r.status_code}",
+                )
+            return JSONResponse(content=r.json())
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="Compare-full timed out") from None
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Modal compare-full failed: {e}") from e
+
     from compare.compare_core import compare_poses
 
     if not body.youtube_url and not body.reference:
@@ -1016,6 +1381,7 @@ async def pose_compare_full(body: CompareFullRequest) -> JSONResponse:
         reference,
         body.user,
         (body.exercise or "").strip(),
+        (body.exercise_muscle or "").strip(),
     )
     return JSONResponse(content=result)
 
