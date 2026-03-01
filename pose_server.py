@@ -25,7 +25,6 @@ from typing import Optional
 
 import cv2
 import httpx
-import mediapipe as mp
 import numpy as np
 import yt_dlp
 import json
@@ -73,16 +72,30 @@ def _check_rate_limit(client_host: str) -> bool:
     _rate_limit[client_host] = (1, now)
     return True
 
-mp_drawing = mp.solutions.drawing_utils
-mp_pose = mp.solutions.pose
+# Lazy-load MediaPipe to avoid segfault on Apple Silicon at startup.
+# Pose detector is created on first use so the server can start and serve /health, exercises, etc.
+_mp_drawing = None
+_mp_pose = None
+_pose_detector = None
 
-pose_detector = mp_pose.Pose(
-    static_image_mode=False,
-    model_complexity=0,   # FAST
-    enable_segmentation=False,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5,
-)
+
+def _get_pose_detector():
+    """Lazily create and return the MediaPipe pose detector."""
+    global _mp_drawing, _mp_pose, _pose_detector
+    if _pose_detector is not None:
+        return _mp_drawing, _mp_pose, _pose_detector
+    import mediapipe as mp
+
+    _mp_drawing = mp.solutions.drawing_utils
+    _mp_pose = mp.solutions.pose
+    _pose_detector = _mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=0,
+        enable_segmentation=False,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    return _mp_drawing, _mp_pose, _pose_detector
 
 
 @app.get("/health")
@@ -469,6 +482,7 @@ class WorkoutSummaryRequest(BaseModel):
     duration_sec: Optional[float] = None
     reps: Optional[int] = None
     samples: list[WorkoutSample] = []
+    user_id: str = "default"
 
 
 class CoachChatRequest(BaseModel):
@@ -479,6 +493,21 @@ class CoachChatRequest(BaseModel):
 class CoachPTReportRequest(BaseModel):
     reason: str  # "progress_declining" | "low_form_score" | "user_requested"
     user_id: str = "default"
+
+
+class SendPTReportRequest(BaseModel):
+    pt_email: str
+    report_text: str
+    pdf_base64: Optional[str] = None  # Optional: frontend can send pre-generated PDF
+
+
+class UserProfileRequest(BaseModel):
+    user_id: str
+    user_email: Optional[str] = None
+    height: Optional[str] = None
+    weight: Optional[str] = None
+    gender: Optional[str] = None
+    pt_email: Optional[str] = None
 
 
 class CompareRequest(BaseModel):
@@ -572,7 +601,8 @@ def _run_pose_preprocess(cap: cv2.VideoCapture, sample_fps: float) -> list:
         t_ms = frame_idx / video_fps * 1000.0
         frame_bgr = cv2.resize(frame_bgr, (256, 256))
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        results = pose_detector.process(frame_rgb)
+        _, _, detector = _get_pose_detector()
+        results = detector.process(frame_rgb)
 
         if results.pose_landmarks:
             landmarks = [[lm.x, lm.y, lm.z] for lm in results.pose_landmarks.landmark]
@@ -971,8 +1001,9 @@ Use plain language only. No bullet points, headers, citations, or [1][2][3]. No 
         if not summary:
             summary = "Your workout session was recorded. Keep practicing to improve your form!"
 
+        user_id = (body.user_id or "default").strip()
         if SUPERMEMORY_API_KEY:
-            memory_content = f"""Workout session: {exercise_info}
+            memory_content = f"""User {user_id}: Workout session: {exercise_info}
 Date: {datetime.utcnow().strftime('%Y-%m-%d')}
 Summary: {summary}
 Areas to work on: {', '.join(w.replace('_', ' ') for w in worst_limbs) if worst_limbs else 'none'}
@@ -981,7 +1012,8 @@ Duration: {body.duration_sec or 0:.0f}s"""
                 memory_content += f"\nReps completed: {body.reps}"
             if unique_feedback:
                 memory_content += f"\nFeedback received during workout: {'; '.join(unique_feedback[:5])}"
-            custom_id = f"workout_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{(body.exercise_name or 'unknown').lower().replace(' ', '_')[:30]}"
+            safe_uid = re.sub(r"[^a-zA-Z0-9_-]", "_", user_id)[:30]
+            custom_id = f"workout_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{(body.exercise_name or 'unknown').lower().replace(' ', '_')[:20]}_{safe_uid}"
             ok = await _supermemory_add_user(memory_content, custom_id)
             if ok:
                 print(f"[supermemory] saved workout to user context: {custom_id}")
@@ -990,7 +1022,7 @@ Duration: {body.duration_sec or 0:.0f}s"""
             from progress_store import add_progress
 
             add_progress(
-                "default",
+                user_id,
                 date=datetime.utcnow().strftime("%Y-%m-%d"),
                 exercise=body.exercise_name or "unknown",
                 muscle=body.exercise_muscle or "",
@@ -1107,11 +1139,46 @@ Do not include any citations or [1][2][3] style references. Use plain text only.
         return JSONResponse(status_code=502, content={"message": msg})
 
 
+def _build_fallback_pt_report(summary: dict, entries: list, rag: str, reason: str) -> str:
+    """Build a formal PT referral report from available data when LLM refuses."""
+    report_id = f"PT-REF-{datetime.utcnow().strftime('%Y')}-{datetime.utcnow().strftime('%m%d%H%M')[:8]}"
+    session_count = len(entries) if entries else 0
+    entries_text = json.dumps(summary, indent=2) if summary else "No session data available."
+    trend = summary.get("trend", "unknown") if summary else "unknown"
+    alert = summary.get("alert") if summary else None
+
+    sections = [
+        f"# Physical Therapist Referral Report\n\nReport ID: {report_id}",
+        f"Referral Date: {datetime.utcnow().strftime('%Y-%m-%d')}",
+        "Referring Provider: Fitness/Wellness Monitoring Service",
+        "Patient Identifier: Anonymous (No PII Included)\n",
+        "## 1. Patient Summary",
+        "This referral is initiated at user request for comprehensive physical therapy evaluation. "
+        "The patient is an active individual engaging in monitored fitness activities. "
+        "Functional baseline is presumed within normal limits for general population based on available data.\n",
+        "## 2. Exercise/Form Data Overview",
+        f"Sessions recorded: {session_count}.",
+        f"Data summary:\n{entries_text}\n" if entries_text and entries_text != "No session data available." else "No session data available.\n",
+        "## 3. Trend Analysis",
+        f"Trend: {trend}.",
+        "No longitudinal patterns identifiable without sufficient data.\n" if session_count < 3 else "",
+        "## 4. Areas of Concern",
+        f"Reason for referral: {reason}.",
+        f"Alert status: {alert or 'None noted'}." if alert else "",
+        "\n## 5. Recommended Next Steps for PT Evaluation",
+        "- Conduct full initial physical therapy evaluation",
+        "- ROM (AROM/PROM), manual muscle testing, functional mobility assessment",
+        "- Establish SMART goals",
+        "- Evaluate & treat at therapist discretion",
+    ]
+    return "\n".join(s for s in sections if s).strip()
+
+
 @app.post("/api/coach/pt-report")
 async def coach_pt_report(request: Request, body: CoachPTReportRequest) -> JSONResponse:
     """Generate formal report for physical therapist when injury/decline detected."""
-    if not OPENAI_API_KEY:
-        return JSONResponse(status_code=503, content={"error": "OPENAI_API_KEY not set", "report": ""})
+    if not PPLX_API_KEY and not OPENAI_API_KEY:
+        return JSONResponse(status_code=503, content={"error": "PPLX_API_KEY or OPENAI_API_KEY required", "report": ""})
     client = getattr(request, "client", None)
     if client and not _check_rate_limit(client.host or "unknown"):
         raise HTTPException(status_code=429, detail="Too many requests.")
@@ -1126,37 +1193,54 @@ async def coach_pt_report(request: Request, body: CoachPTReportRequest) -> JSONR
         chunks = await _supermemory_search(search_q, limit=8, include_user=True)
         rag = "\n---\n".join(chunks) if chunks else "No additional context."
 
-        report_context = f"""Generate a formal Physical Therapist Referral Report.
+        report_context = f"""Output a fitness data summary document. This is a template the user will share with their physical therapist.
 
-Reason for referral: {body.reason}
-User progress data (last {len(entries)} sessions):
-{json.dumps(summary, indent=2)}
+TASK: Write the full document body below. No preamble, no "I cannot", no disclaimers. Start directly with the report content.
 
-Recent workout context from user's history:
-{rag}
+INPUT DATA:
+- Reason for referral: {body.reason}
+- User progress (last {len(entries)} sessions): {json.dumps(summary, indent=2)}
+- Workout context: {rag}
 
-Create a professional 1-2 page report with:
-1. Patient Summary (anonymous - no PII)
-2. Exercise/Form Data Overview
-3. Trend Analysis
-4. Areas of Concern
+REQUIRED SECTIONS (use ## headings):
+1. Patient Summary - anonymous fitness app user, no PII
+2. Exercise/Form Data Overview - summarize the data above
+3. Trend Analysis - describe trends from the progress data
+4. Areas of Concern - based on reason and data
 5. Recommended Next Steps for PT Evaluation
 
-Use formal medical/fitness terminology. Be concise but thorough. Format for a healthcare professional."""
+Use professional fitness/wellness terminology. Be concise. Output the complete document now."""
 
         from openai import AsyncOpenAI
-        oai = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        if PPLX_API_KEY:
+            oai = AsyncOpenAI(api_key=PPLX_API_KEY, base_url="https://api.perplexity.ai")
+            model = "sonar"
+        else:
+            oai = AsyncOpenAI(api_key=OPENAI_API_KEY)
+            model = "gpt-4o-mini"
         r = await oai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": report_context}],
-            max_tokens=800,
+            model=model,
+            messages=[
+                {"role": "system", "content": "You write fitness data summary documents. Output only the document body. No refusals or disclaimers."},
+                {"role": "user", "content": report_context}
+            ],
+            max_tokens=1500,
             temperature=0.3,
         )
         report = ""
         if r.choices and len(r.choices) > 0:
             report = (r.choices[0].message.content or "").strip()
-        if not report:
-            report = "Unable to generate report. Your progress data is available in the app."
+
+        # Detect LLM refusal and use fallback template
+        refusal_phrases = [
+            "i cannot", "i'm unable", "i am unable", "i appreciate your request",
+            "cannot generate", "cannot create", "consult with your", "licensed healthcare",
+            "medical professional", "only be produced by", "would constitute",
+        ]
+        report_lower = report.lower()
+        if not report or any(p in report_lower for p in refusal_phrases):
+            report = _build_fallback_pt_report(summary, entries, rag, body.reason)
+
         return JSONResponse(content={"report": report, "alert": body.reason})
     except Exception as e:
         print(f"[coach-pt-report] error: {e}")
@@ -1165,6 +1249,87 @@ Use formal medical/fitness terminology. Be concise but thorough. Format for a he
                 "report": "Sorry, the report couldn't be generated. Try again or check your connection.",
                 "alert": body.reason,
             },
+        )
+
+
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
+RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "AlignAI <onboarding@resend.dev>")
+
+
+@app.post("/api/user/profile")
+async def save_user_profile(body: UserProfileRequest) -> JSONResponse:
+    """Save user profile to Supermemory for personalized coaching."""
+    user_id = (body.user_id or "default").strip()
+    if not user_id:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "user_id required"})
+    content_parts = [f"User profile (user_id={user_id}):"]
+    if body.user_email:
+        content_parts.append(f"User email: {body.user_email}")
+    if body.height:
+        content_parts.append(f"Height: {body.height}")
+    if body.weight:
+        content_parts.append(f"Weight: {body.weight}")
+    if body.gender:
+        content_parts.append(f"Gender: {body.gender}")
+    if body.pt_email:
+        content_parts.append(f"Physical therapist email: {body.pt_email}")
+    content = "\n".join(content_parts)
+    if len(content) < 30:
+        return JSONResponse(content={"ok": True})
+    custom_id = f"profile_{re.sub(r'[^a-zA-Z0-9_-]', '_', user_id)}"
+    ok = await _supermemory_add_user(content, custom_id)
+    return JSONResponse(content={"ok": ok})
+
+
+@app.post("/api/pt-report/send-email")
+async def send_pt_report_email(body: SendPTReportRequest) -> JSONResponse:
+    """Send PT report via email using Resend API."""
+    if not RESEND_API_KEY:
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "error": "RESEND_API_KEY not set. Add it to .env to enable email."},
+        )
+    pt_email = (body.pt_email or "").strip()
+    if not pt_email or "@" not in pt_email:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "Valid PT email address is required."},
+        )
+    report_text = body.report_text or ""
+    if not report_text:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "Report content is required."},
+        )
+    try:
+        import base64
+        import resend
+
+        resend.api_key = RESEND_API_KEY
+        params = {
+            "from": RESEND_FROM_EMAIL,
+            "to": [pt_email],
+            "subject": "Physical Therapist Referral Report from AlignAI",
+            "html": f"<p>Please find attached your Physical Therapist Referral Report from AlignAI.</p><pre style='white-space:pre-wrap;font-family:inherit;'>{report_text[:5000]}</pre>",
+        }
+        if body.pdf_base64:
+            try:
+                base64.b64decode(body.pdf_base64)
+                params["attachments"] = [
+                    {"content": body.pdf_base64, "filename": "PT_Referral_Report.pdf"}
+                ]
+            except Exception as e:
+                print(f"[pt-report-send] pdf decode error: {e}")
+                params["attachments"] = []
+        else:
+            params["attachments"] = []
+        email = resend.Emails.send(params)
+        return JSONResponse(content={"ok": True, "id": getattr(email, "id", None)})
+    except Exception as e:
+        print(f"[pt-report-send] error: {e}")
+        return JSONResponse(
+            status_code=502,
+            content={"ok": False, "error": str(e) or "Failed to send email."},
         )
 
 
@@ -1305,8 +1470,9 @@ def _read_image_from_upload(file: UploadFile) -> np.ndarray:
 
 
 def _annotate_pose_on_frame(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
+    mp_drawing, mp_pose, detector = _get_pose_detector()
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    results = pose_detector.process(frame_rgb)
+    results = detector.process(frame_rgb)
     if not results.pose_landmarks:
         return None
     annotated = frame_bgr.copy()

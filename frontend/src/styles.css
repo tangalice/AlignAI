@@ -112,6 +112,41 @@ body {
   font-weight: 400;
   margin-top: 1px;
 }
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.header-user-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: hsl(var(--glass-bg));
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid hsl(var(--glass-border));
+  border-radius: 9999px;
+  color: hsl(220 10% 90%);
+  font-size: 0.85rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+.header-user-btn:hover {
+  background: hsl(220 15% 22%);
+  border-color: hsl(var(--primary) / 0.4);
+}
+.header-user-btn svg {
+  flex-shrink: 0;
+  color: hsl(var(--primary));
+}
+.header-user-email {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .session-badge {
   display: flex;
   align-items: center;
@@ -1315,17 +1350,123 @@ body {
   overflow-y: auto;
   color: hsl(0 0% 92%);
 }
-.coach-copy {
+.coach-header-actions { display: flex; align-items: center; gap: 8px; }
+.coach-settings-btn {
+  padding: 6px;
+  background: transparent;
+  border: none;
+  color: hsl(220 10% 75%);
+  cursor: pointer;
+  border-radius: 8px;
+}
+.coach-settings-btn:hover { color: hsl(220 10% 90%); background: hsl(220 15% 25%); }
+.coach-report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.coach-copy, .coach-download-pdf, .coach-send-pt {
   padding: 8px 16px;
   font-size: 0.85rem;
   font-family: inherit;
-  background: hsl(var(--primary) / 0.2);
-  border: 1px solid hsl(var(--primary) / 0.4);
   border-radius: 9999px;
-  color: hsl(var(--primary));
   cursor: pointer;
 }
+.coach-copy {
+  background: hsl(var(--primary) / 0.2);
+  border: 1px solid hsl(var(--primary) / 0.4);
+  color: hsl(var(--primary));
+}
 .coach-copy:hover { background: hsl(var(--primary) / 0.3); }
+.coach-download-pdf {
+  background: hsl(145 60% 45% / 0.3);
+  border: 1px solid hsl(145 60% 50% / 0.5);
+  color: hsl(145 70% 70%);
+}
+.coach-download-pdf:hover { background: hsl(145 60% 45% / 0.5); }
+.coach-send-pt {
+  background: hsl(225 70% 55% / 0.9);
+  border: 1px solid hsl(225 60% 70% / 0.5);
+  color: hsl(0 0% 100%);
+}
+.coach-send-pt:hover:not(:disabled) { background: hsl(225 70% 62% / 0.95); }
+.coach-send-pt:disabled { opacity: 0.7; cursor: not-allowed; }
+.coach-send-error { margin: 8px 0 0; font-size: 0.8rem; color: hsl(0 80% 65%); }
+.coach-send-success { margin: 8px 0 0; font-size: 0.8rem; color: hsl(145 60% 55%); }
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+.settings-modal {
+  background: hsl(220 20% 14%);
+  border-radius: 16px;
+  max-width: 420px;
+  width: 90%;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+.settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid hsl(220 15% 25%);
+}
+.settings-header h3 { margin: 0; font-size: 1.1rem; }
+.settings-close {
+  background: none;
+  border: none;
+  color: hsl(220 10% 70%);
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.settings-close:hover { color: hsl(0 0% 100%); }
+.settings-body { padding: 20px; }
+.settings-hint { margin: 0 0 16px; font-size: 0.85rem; color: hsl(220 10% 70%); }
+.settings-field { margin-bottom: 16px; }
+.settings-field label { display: block; margin-bottom: 6px; font-size: 0.9rem; color: hsl(220 10% 85%); }
+.settings-field input, .settings-field select {
+  width: 100%;
+  padding: 10px 12px;
+  background: hsl(220 15% 18%);
+  border: 1px solid hsl(220 15% 28%);
+  border-radius: 8px;
+  color: hsl(0 0% 95%);
+  font-size: 0.9rem;
+}
+.settings-field input:focus, .settings-field select:focus {
+  outline: none;
+  border-color: hsl(var(--primary));
+}
+.settings-hint-small { display: block; margin-top: 4px; font-size: 0.75rem; color: hsl(220 10% 60%); }
+.settings-footer {
+  padding: 16px 20px;
+  border-top: 1px solid hsl(220 15% 25%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.settings-saved { font-size: 0.85rem; color: hsl(145 60% 55%); }
+.settings-save-btn {
+  padding: 10px 20px;
+  background: hsl(var(--primary));
+  border: none;
+  border-radius: 9999px;
+  color: hsl(0 0% 100%);
+  font-weight: 600;
+  cursor: pointer;
+}
+.settings-save-btn:hover:not(:disabled) { opacity: 0.9; }
+.settings-save-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* ---- Animations ---- */
 @keyframes pulse-glow {

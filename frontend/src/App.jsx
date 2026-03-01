@@ -6,7 +6,9 @@ import { Toast } from "./components/Toast";
 import { ExerciseSearch } from "./components/ExerciseSearch";
 import { useExerciseSearch } from "./hooks/useExerciseSearch";
 import { loadWorkoutHistory, saveWorkoutToHistory, clearWorkoutHistory } from "./hooks/useWorkoutHistory";
+import { getUserId, loadProfile } from "./hooks/useUserProfile";
 import { CoachPanel } from "./components/CoachPanel";
+import { SettingsModal } from "./components/SettingsModal";
 
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
@@ -111,6 +113,8 @@ function App() {
   const youtubeVideoIdFromUrl = referenceVideoUrl?.match(/\/api\/youtube\/([^/?#]+)/)?.[1] ?? null;
 
   const [ttsEnabled, setTtsEnabled] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [profile, setProfile] = useState(() => loadProfile());
 
   useEffect(() => {
     const el = aiTextareaRef.current;
@@ -851,6 +855,7 @@ function App() {
           exercise_muscle: referenceExerciseMuscle || "",
           duration_sec: durationSec,
           reps: repCountRef.current || undefined,
+          user_id: getUserId(),
           samples: samples.map((s) => ({
             video_t: s.video_t,
             score: s.score,
@@ -895,6 +900,7 @@ function App() {
           exercise_muscle: referenceExerciseMuscle || "",
           duration_sec: durationSec,
           reps: repCountRef.current || undefined,
+          user_id: getUserId(),
           samples: samples.map((s) => ({
             video_t: s.video_t,
             score: s.score,
@@ -1103,22 +1109,6 @@ function App() {
         }
       }
 
-      if (score != null && score >= 0) {
-        const pad = 12;
-        const fontPx = Math.min(48, canvas.height * 0.12);
-        ctx.font = `bold ${fontPx}px system-ui, sans-serif`;
-        const text = `${score}%`;
-        const metrics = ctx.measureText(text);
-        const w = metrics.width + pad * 2;
-        const h = fontPx + pad * 2;
-        const x = canvas.width - w - pad;
-        const y = pad;
-        ctx.fillStyle = "rgba(0,0,0,0.6)";
-        ctx.fillRect(x, y, w, h);
-        ctx.fillStyle = colors.primary;
-        ctx.fillText(text, x + pad, y + h - pad - 4);
-      }
-
       ctx.restore();
       animationFrameId = requestAnimationFrame(renderLoop);
     };
@@ -1248,15 +1238,25 @@ function App() {
           </div>
           <div className="header-titles">
             <h1>AlignAI</h1>
-            {/* <span className="header-subtitle">Physical Therapy & Workout Form Analysis</span> */}
           </div>
         </div>
-        {workoutActive && (
-          <div className="session-badge">
-            <span className="session-dot" />
-            <span>Session Active</span>
-          </div>
-        )}
+        <div className="header-right">
+          {workoutActive && (
+            <div className="session-badge">
+              <span className="session-dot" />
+              <span>Session Active</span>
+            </div>
+          )}
+          <button
+            type="button"
+            className="header-user-btn"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Profile & Settings"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+            <span className="header-user-email">{profile.userEmail || "Sign in"}</span>
+          </button>
+        </div>
       </header>
 
       {/* ---- Search area (fixed-height slot so toggling YouTube/AI doesn’t shift layout) ---- */}
@@ -1658,7 +1658,8 @@ function App() {
       )}
 
       <Toast message={toast} onDismiss={() => setToast(null)} type="error" />
-      <CoachPanel apiBase={apiBase} />
+      <CoachPanel apiBase={apiBase} onOpenSettings={() => setSettingsOpen(true)} />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} apiBase={apiBase} onProfileSaved={(p) => setProfile(p)} />
     </div>
   );
 }

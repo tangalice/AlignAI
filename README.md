@@ -91,6 +91,10 @@ If Modal is not configured, you can still use direct ElevenLabs by setting `ELEV
 
 For smarter, contextual coaching feedback, set `OPENAI_API_KEY`. When enabled, the app will call GPT-4o-mini to generate short, actionable form tips (e.g. "Bring your elbow closer to your body") instead of generic "Adjust your arm" messages. Voice coach uses the LLM output exclusively (no voice when the LLM call fails).
 
+### PT Report Email (optional)
+
+To send PT referral reports by email, add `RESEND_API_KEY` to `.env` (get one at [resend.com](https://resend.com)). Optionally set `RESEND_FROM_EMAIL` to a verified domain (default: `AlignAI <onboarding@resend.dev>`).
+
 ### Supermemory (optional – RAG for form guides)
 
 [Supermemory](https://supermemory.ai/) powers retrieval-augmented coaching: the LLM gets relevant form cues from an exercise knowledge base before generating tips.
