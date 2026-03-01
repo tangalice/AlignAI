@@ -397,25 +397,6 @@ class CompareFullRequest(BaseModel):
     sample_fps: float = 8.0
 
 
-def _download_youtube_to_temp(url: str) -> Path:
-    tmp_dir = Path(tempfile.mkdtemp())
-    out_path = tmp_dir / "video.%(ext)s"
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "outtmpl": str(out_path),
-        "format": "best[ext=mp4][height<=720]/best[ext=mp4]/best[height<=720]",
-        "noplaylist": True,
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
-    # yt-dlp may have produced video.mp4 or video.mkv etc.
-    for p in tmp_dir.iterdir():
-        if p.suffix in (".mp4", ".mkv", ".webm", ".avi"):
-            return p
-    raise FileNotFoundError("No video file downloaded")
-
-
 def _cuda_available() -> bool:
     try:
         import torch
