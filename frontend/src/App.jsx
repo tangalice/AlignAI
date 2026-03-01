@@ -57,6 +57,8 @@ function App() {
   const [ytLoading, setYtLoading] = useState(false);
   const [ytError, setYtError] = useState(null);
   const [preprocessLoading, setPreprocessLoading] = useState(false);
+  const preprocessLoadingRef = useRef(false);
+  preprocessLoadingRef.current = preprocessLoading;
   const [preprocessResult, setPreprocessResult] = useState(null);
   const [preprocessError, setPreprocessError] = useState(null);
   const [coachingFeedback, setCoachingFeedback] = useState(null);
@@ -409,6 +411,7 @@ function App() {
   const handleYtPlayPause = () => {
     const el = ytVideoRef.current;
     if (!el) return;
+    if (preprocessLoadingRef.current) return; // don't allow play while extracting
     if (ytPlaying) el.pause();
     else el.play().catch(() => {});
   };
@@ -487,8 +490,14 @@ function App() {
     // Try API preprocess first (Modal GPU) when we have a fetchable URL
     if (referenceVideoUrl.startsWith("http://") || referenceVideoUrl.startsWith("https://")) {
       setPreprocessLoading(true);
+      preprocessLoadingRef.current = true;
       setPreprocessError(null);
       setPreprocessResult(null);
+      const el = ytVideoRef.current;
+      if (el) {
+        el.pause();
+      }
+      setYtPlaying(false);
       try {
         const res = await fetch(`${apiBase}/api/preprocess`, {
           method: "POST",
@@ -499,11 +508,13 @@ function App() {
         if (res.ok) {
           setPreprocessResult(JSON.stringify({ source_url: referenceVideoUrl, frames: data.frames }));
           setPreprocessLoading(false);
+          preprocessLoadingRef.current = false;
           return;
         }
         throw new Error(data.detail || data.error || "Preprocess failed");
       } catch (err) {
         setPreprocessLoading(false);
+        preprocessLoadingRef.current = false;
         setPreprocessError(err.message || "API preprocess failed. Trying browser…");
         // Fall through to in-browser preprocess
       }
@@ -547,9 +558,11 @@ function App() {
     const originalRate = video.playbackRate;
 
     setPreprocessLoading(true);
+    preprocessLoadingRef.current = true;
     setPreprocessError(null);
     setPreprocessResult(null);
     video.pause();
+    setYtPlaying(false);
     let offlineLandmarker = null;
 
     try {
@@ -624,6 +637,7 @@ function App() {
         // ignore restore errors
       }
       setPreprocessLoading(false);
+      preprocessLoadingRef.current = false;
     }
   }, [referenceVideoUrl, apiBase]);
 
@@ -697,6 +711,16 @@ function App() {
 
   const referenceFramesRef = useRef(null);
   const lastPreprocessedExerciseIdRef = useRef(null);
+
+  // Pause reference video while extracting poses
+  useEffect(() => {
+    if (!preprocessLoading) return;
+    const el = ytVideoRef.current;
+    if (el && !el.paused) {
+      el.pause();
+      setYtPlaying(false);
+    }
+  }, [preprocessLoading]);
 
   // Auto-extract pose coordinates when exercise video loads (YouTube or Workout tab)
   useEffect(() => {
@@ -1353,7 +1377,13 @@ function App() {
                     className="ref-video"
                     playsInline loop preload="auto" crossOrigin="anonymous"
                     poster={youtubeVideoIdFromUrl ? `https://img.youtube.com/vi/${youtubeVideoIdFromUrl}/hqdefault.jpg` : undefined}
-                    onPlay={() => setYtPlaying(true)}
+                    onPlay={() => {
+                      if (preprocessLoadingRef.current) {
+                        ytVideoRef.current?.pause();
+                        return;
+                      }
+                      setYtPlaying(true);
+                    }}
                     onPause={() => setYtPlaying(false)}
                     onTimeUpdate={handleYtTimeUpdate}
                     onLoadedMetadata={(e) => setYtDuration(e.target.duration ?? 0)}
@@ -1364,6 +1394,7 @@ function App() {
                   />
                   <canvas ref={ytSkeletonCanvasRef} className="skeleton-overlay" aria-hidden="true" />
                   {ytLoading && <div className="video-loading-overlay">Loading video…</div>}
+                  {preprocessLoading && <div className="video-loading-overlay">Extracting reference poses…</div>}
                   {ytError && <div className="video-error-overlay">{ytError}</div>}
                 </div>
               ) : activeTab === "ai" && (aiLoading || aiVideoUrl) ? (
