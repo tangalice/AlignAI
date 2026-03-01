@@ -1,4 +1,4 @@
-const STORAGE_KEY = "formai_workout_history";
+const STORAGE_KEY = "alignai_workout_history";
 const MAX_ENTRIES = 50;
 
 export function loadWorkoutHistory() {
@@ -21,6 +21,7 @@ export function saveWorkoutToHistory(entry) {
     muscle: entry.muscle || "",
     summary: entry.summary || "",
     durationSec: entry.durationSec ?? null,
+    reps: entry.reps ?? 0,
   };
   const updated = [newEntry, ...history].slice(0, MAX_ENTRIES);
   try {

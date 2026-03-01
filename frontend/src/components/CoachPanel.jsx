@@ -14,7 +14,7 @@ export function CoachPanel({ apiBase: apiBaseProp }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState("chat"); // "chat" | "progress" | "report"
   const [messages, setMessages] = useState([
-    { role: "assistant", content: "Hi! I'm your FormAI coach. I know your workout history and can help with form, progress, or anything fitness-related. What's on your mind?" },
+    { role: "assistant", content: "Hi! I'm your AlignAI coach. I know your workout history and can help with form, progress, or anything fitness-related. What's on your mind?" },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -123,13 +123,15 @@ export function CoachPanel({ apiBase: apiBaseProp }) {
         onClick={() => setOpen(!open)}
         aria-label={open ? "Close coach" : "Open AI coach"}
       >
-        {open ? "×" : "💬"}
+        {open ? "×" : (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+      )}
       </button>
 
       {open && (
         <div className="coach-panel">
           <div className="coach-panel-header">
-            <h3>FormAI Coach</h3>
+            <h3>AlignAI Coach</h3>
             <button type="button" className="coach-close" onClick={() => setOpen(false)} aria-label="Close">×</button>
           </div>
 
@@ -162,17 +164,21 @@ export function CoachPanel({ apiBase: apiBaseProp }) {
                 <div ref={messagesEndRef} />
               </div>
               <div className="coach-input-wrap">
-                <input
-                  ref={inputRef}
-                  type="text"
-                  className="coach-input"
-                  placeholder={coachAvailable ? "Ask about your workouts..." : "Coach unavailable"}
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  disabled={loading || !coachAvailable}
-                />
-                <button type="button" className="coach-send" onClick={handleSend} disabled={loading || !input.trim() || !coachAvailable}>Send</button>
+                <div className="coach-input-row">
+                  <input
+                    ref={inputRef}
+                    type="text"
+                    className="coach-input"
+                    placeholder={coachAvailable ? "Ask about your form..." : "Coach unavailable"}
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    disabled={loading || !coachAvailable}
+                  />
+                  <button type="button" className="coach-send" onClick={handleSend} disabled={loading || !input.trim() || !coachAvailable}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 2L11 13" /><path d="M22 2L15 22 11 13 2 9 22 2z" /></svg>
+                  </button>
+                </div>
               </div>
             </div>
           )}
