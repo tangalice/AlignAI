@@ -1,4 +1,7 @@
 venv/
+.venv/
 __pycache__/
 .env
 frontend/node_modules/
+*.pt
+yolov8n-pose.pt
