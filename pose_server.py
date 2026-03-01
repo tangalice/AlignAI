@@ -7,11 +7,12 @@ import httpx
 import mediapipe as mp
 import numpy as np
 import yt_dlp
+import json
 from pydantic import BaseModel
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, Response
 
 
 class AIVideoRequest(BaseModel):
@@ -112,35 +113,63 @@ def _annotate_pose_on_frame(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
     return annotated
 
 
-MODAL_VIDEO_ENDPOINT = os.environ.get("MODAL_VIDEO_ENDPOINT", "").rstrip("/")
+_gen = (os.environ.get("MODAL_VIDEO_GENERATE_ENDPOINT") or "").strip().strip('"\'')
+_dl  = (os.environ.get("MODAL_VIDEO_DOWNLOAD_BASE") or "").strip().strip('"\'')
+
+def _clean_url(u: str) -> str:
+    u = (u or "").strip().strip('"\'')
+    u = u.replace("\u201c", '"').replace("\u201d", '"')  # protect from smart quotes
+    u = u.strip('"\'')
+    if u and not u.startswith(("http://", "https://")):
+        u = "https://" + u
+    return u.rstrip("/")
+
+MODAL_VIDEO_GENERATE_ENDPOINT = _clean_url(_gen)
+MODAL_VIDEO_DOWNLOAD_BASE = _clean_url(_dl)
+
+# Avoid Modal/API ASCII codec errors from smart quotes etc.
+_unicode_to_ascii = str.maketrans({
+    "\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'",
+    "\u2013": "-", "\u2014": "-", "\u2026": "...",
+})
 
 
-@app.post("/api/ai-video/generate")
-async def ai_video_generate(body: AIVideoRequest) -> StreamingResponse:
-    """Generate a workout/exercise video from a text description via Modal.com."""
-    prompt = (body.prompt or "").strip()
-    if not prompt:
-        raise HTTPException(status_code=400, detail="Missing or empty prompt")
+def _ascii_safe_prompt(s: str) -> str:
+    return s.translate(_unicode_to_ascii).encode("ascii", "replace").decode("ascii")
 
-    if not MODAL_VIDEO_ENDPOINT:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "AI video generation is not configured. Set MODAL_VIDEO_ENDPOINT to your Modal "
-                "deployed endpoint (e.g. https://your-app--generate.modal.run)."
-            ),
-        )
 
-    try:
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            r = await client.post(MODAL_VIDEO_ENDPOINT, json={"prompt": prompt})
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="Video generation timed out. Try again or use a shorter description.",
-        ) from None
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Modal request failed: {e}") from e
+@app.post("/api/ai-video/generate-sse")
+async def ai_video_generate_sse(body: AIVideoRequest):
+    if not MODAL_VIDEO_GENERATE_ENDPOINT:
+        raise HTTPException(status_code=503, detail="Set MODAL_VIDEO_GENERATE_ENDPOINT")
+
+    generate_url = f"{MODAL_VIDEO_GENERATE_ENDPOINT}/generate"
+
+    async def event_stream():
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("POST", generate_url, json={"prompt": body.prompt}) as r:
+                if r.status_code != 200:
+                    text = await r.aread()
+                    # emit a single SSE error so the client can show it
+                    err = text.decode("utf-8", "replace")
+                    yield f"data: {json.dumps({'type':'error','message':err})}\n\n"
+                    return
+
+                async for chunk in r.aiter_bytes():
+                    # passthrough SSE bytes exactly
+                    yield chunk
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/ai-video/download/{gen_id}")
+async def ai_video_download(gen_id: str):
+    if not MODAL_VIDEO_DOWNLOAD_BASE:
+        raise HTTPException(status_code=503, detail="Set MODAL_VIDEO_ENDPOINT")
+    download_url = f"{MODAL_VIDEO_DOWNLOAD_BASE}/download/{gen_id}"
+
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        r = await client.get(download_url)
 
     if r.status_code != 200:
         raise HTTPException(
@@ -153,9 +182,9 @@ async def ai_video_generate(body: AIVideoRequest) -> StreamingResponse:
         raise HTTPException(status_code=502, detail="Empty response from Modal")
 
     return StreamingResponse(
-        io.BytesIO(content),
+        io.BytesIO(r.content),
         media_type="video/mp4",
-        headers={"Content-Disposition": "inline; filename=ai-workout.mp4"},
+        headers={"Content-Disposition": f'inline; filename="{gen_id}.mp4"'},
     )
 
 

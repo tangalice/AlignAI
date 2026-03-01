@@ -43,6 +43,10 @@ function App() {
   const [aiDuration, setAiDuration] = useState(0);
   const [aiVolume, setAiVolume] = useState(100);
   const [aiSpeed, setAiSpeed] = useState(1);
+  const [aiStage, setAiStage] = useState("");
+  const [aiProgressText, setAiProgressText] = useState("");
+  const [aiPercent, setAiPercent] = useState(0);  
+  const [aiGenId, setAiGenId] = useState(null);
 
   const ytVideoRef = useRef(null);
   const aiVideoRef = useRef(null);
@@ -56,28 +60,94 @@ function App() {
   const handleGenerateAiVideo = async () => {
     const prompt = (aiDescription || "").trim();
     if (!prompt) {
-      setAiError("Please enter a description for the workout/exercise video.");
+      setAiError("Please enter a description.");
       return;
     }
+  
     setAiError(null);
     setAiLoading(true);
+    setAiProgressText("Starting…");
+    setAiPercent(0);
+  
     if (aiVideoUrl) {
       URL.revokeObjectURL(aiVideoUrl);
       setAiVideoUrl(null);
     }
+  
     try {
-      const res = await fetch(`${apiBase}/api/ai-video/generate`, {
+      const res = await fetch(`${apiBase}/api/ai-video/generate-sse`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt }),
       });
-      if (!res.ok) {
+  
+      if (!res.ok || !res.body) {
         const text = await res.text();
-        throw new Error(text || `Generation failed (${res.status})`);
+        throw new Error(text || `Request failed (${res.status})`);
       }
-      const blob = await res.blob();
+  
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      let genId = null;
+  
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+  
+        buffer += decoder.decode(value, { stream: true });
+  
+        // parse SSE frames split by blank line
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+  
+        for (const part of parts) {
+          const line = part.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+  
+          const jsonStr = line.slice(6);
+          let evt;
+          try {
+            evt = JSON.parse(jsonStr);
+          } catch {
+            continue;
+          }
+  
+          if (evt.type === "genId") {
+            genId = evt.id;
+          }
+  
+          if (evt.type === "progress") {
+            setAiPercent(evt.percent ?? 0);
+            setAiProgressText(evt.phase ? `${evt.phase}…` : "Working…");
+          }
+  
+          if (evt.type === "synthesis") {
+            setAiProgressText("Generating video…");
+          }
+  
+          if (evt.type === "error") {
+            throw new Error(evt.message || "Generation failed");
+          }
+  
+          if (evt.type === "done") {
+            genId = evt.id || genId;
+          }
+        }
+      }
+  
+      if (!genId) throw new Error("No generation id returned.");
+  
+      // Download mp4 from YOUR server (FastAPI), not directly from Modal
+      const videoRes = await fetch(`${apiBase}/api/ai-video/download/${genId}`);
+      if (!videoRes.ok) throw new Error(await videoRes.text());
+  
+      const blob = await videoRes.blob();
       const url = URL.createObjectURL(blob);
       setAiVideoUrl(url);
+      setAiProgressText("Done!");
+      setAiPercent(100);
+  
     } catch (err) {
       setAiError(err.message || "Failed to generate video.");
     } finally {
@@ -393,8 +463,19 @@ function App() {
             onClick={handleGenerateAiVideo}
             disabled={aiLoading}
           >
-            {aiLoading ? "Generating…" : "Generate Video"}
+            {aiLoading ? `Generating… ${aiPercent}%` : "Generate Video"}
           </button>
+          {aiLoading && (
+            <div className="ai-progress">
+              <div className="ai-progress-top">
+                <span className="ai-progress-stage">{aiStage || "working"}</span>
+                <span className="ai-progress-percent">{aiPercent}%</span>
+              </div>
+              <div className="ai-progress-bar">
+                <div className="ai-progress-fill" style={{ width: `${aiPercent}%` }} />
+              </div>
+            </div>
+          )}
           {aiError && <div className="ai-error">{aiError}</div>}
         </div>
       )}
