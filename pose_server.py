@@ -24,11 +24,12 @@ import httpx
 import mediapipe as mp
 import numpy as np
 import yt_dlp
+import json
 from pydantic import BaseModel
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse, Response
 
 class AIVideoRequest(BaseModel):
     prompt: str
@@ -416,25 +417,6 @@ class CompareFullRequest(BaseModel):
     user: dict
     exercise: str = ""
     sample_fps: float = 8.0
-
-
-def _download_youtube_to_temp(url: str) -> Path:
-    tmp_dir = Path(tempfile.mkdtemp())
-    out_path = tmp_dir / "video.%(ext)s"
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "outtmpl": str(out_path),
-        "format": "best[ext=mp4][height<=720]/best[ext=mp4]/best[height<=720]",
-        "noplaylist": True,
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
-    # yt-dlp may have produced video.mp4 or video.mkv etc.
-    for p in tmp_dir.iterdir():
-        if p.suffix in (".mp4", ".mkv", ".webm", ".avi"):
-            return p
-    raise FileNotFoundError("No video file downloaded")
 
 
 def _cuda_available() -> bool:
@@ -863,27 +845,28 @@ async def preprocess_youtube_for_supermemory(body: PreprocessRequest) -> JSONRes
 
 @app.get("/api/youtube/{video_id}")
 async def youtube_stream(video_id: str):
-    """Serve a YouTube video as a same-origin MP4 file so WebGL/MediaPipe can read pixels safely."""
+    """Stream YouTube video through the backend so the browser loads from our origin (no redirect to YouTube)."""
     if not video_id or len(video_id) > 20:
         raise HTTPException(status_code=400, detail="Invalid video ID")
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    tmp_path: Path | None = None
     try:
-        tmp_path = _download_youtube_to_temp(url)
-        data = tmp_path.read_bytes()
+        stream_url = _get_youtube_stream_url(video_id)
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Could not download video: {e}") from e
-    finally:
-        if tmp_path and tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-            try:
-                tmp_path.parent.rmdir()
-            except OSError:
-                pass
-    return StreamingResponse(io.BytesIO(data), media_type="video/mp4")
+        raise HTTPException(status_code=502, detail=f"Could not get stream: {e}") from e
+
+    async def stream_body():
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+            async with client.stream("GET", stream_url) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+
+    return StreamingResponse(
+        stream_body(),
+        media_type="video/mp4",
+        headers={"Accept-Ranges": "bytes"},
+    )
 
 
 def _read_image_from_upload(file: UploadFile) -> np.ndarray:
@@ -913,35 +896,63 @@ def _annotate_pose_on_frame(frame_bgr: np.ndarray) -> Optional[np.ndarray]:
     return annotated
 
 
-MODAL_VIDEO_ENDPOINT = os.environ.get("MODAL_VIDEO_ENDPOINT", "").rstrip("/")
+_gen = (os.environ.get("MODAL_VIDEO_GENERATE_ENDPOINT") or "").strip().strip('"\'')
+_dl  = (os.environ.get("MODAL_VIDEO_DOWNLOAD_BASE") or "").strip().strip('"\'')
+
+def _clean_url(u: str) -> str:
+    u = (u or "").strip().strip('"\'')
+    u = u.replace("\u201c", '"').replace("\u201d", '"')  # protect from smart quotes
+    u = u.strip('"\'')
+    if u and not u.startswith(("http://", "https://")):
+        u = "https://" + u
+    return u.rstrip("/")
+
+MODAL_VIDEO_GENERATE_ENDPOINT = _clean_url(_gen)
+MODAL_VIDEO_DOWNLOAD_BASE = _clean_url(_dl)
+
+# Avoid Modal/API ASCII codec errors from smart quotes etc.
+_unicode_to_ascii = str.maketrans({
+    "\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'",
+    "\u2013": "-", "\u2014": "-", "\u2026": "...",
+})
 
 
-@app.post("/api/ai-video/generate")
-async def ai_video_generate(body: AIVideoRequest) -> StreamingResponse:
-    """Generate a workout/exercise video from a text description via Modal.com."""
-    prompt = (body.prompt or "").strip()
-    if not prompt:
-        raise HTTPException(status_code=400, detail="Missing or empty prompt")
+def _ascii_safe_prompt(s: str) -> str:
+    return s.translate(_unicode_to_ascii).encode("ascii", "replace").decode("ascii")
 
-    if not MODAL_VIDEO_ENDPOINT:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "AI video generation is not configured. Set MODAL_VIDEO_ENDPOINT to your Modal "
-                "deployed endpoint (e.g. https://your-app--generate.modal.run)."
-            ),
-        )
 
-    try:
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            r = await client.post(MODAL_VIDEO_ENDPOINT, json={"prompt": prompt})
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="Video generation timed out. Try again or use a shorter description.",
-        ) from None
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Modal request failed: {e}") from e
+@app.post("/api/ai-video/generate-sse")
+async def ai_video_generate_sse(body: AIVideoRequest):
+    if not MODAL_VIDEO_GENERATE_ENDPOINT:
+        raise HTTPException(status_code=503, detail="Set MODAL_VIDEO_GENERATE_ENDPOINT")
+
+    generate_url = f"{MODAL_VIDEO_GENERATE_ENDPOINT}/generate"
+
+    async def event_stream():
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("POST", generate_url, json={"prompt": body.prompt}) as r:
+                if r.status_code != 200:
+                    text = await r.aread()
+                    # emit a single SSE error so the client can show it
+                    err = text.decode("utf-8", "replace")
+                    yield f"data: {json.dumps({'type':'error','message':err})}\n\n"
+                    return
+
+                async for chunk in r.aiter_bytes():
+                    # passthrough SSE bytes exactly
+                    yield chunk
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/api/ai-video/download/{gen_id}")
+async def ai_video_download(gen_id: str):
+    if not MODAL_VIDEO_DOWNLOAD_BASE:
+        raise HTTPException(status_code=503, detail="Set MODAL_VIDEO_DOWNLOAD_BASE")
+    download_url = f"{MODAL_VIDEO_DOWNLOAD_BASE}/download/{gen_id}"
+
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        r = await client.get(download_url)
 
     if r.status_code != 200:
         raise HTTPException(
@@ -954,9 +965,9 @@ async def ai_video_generate(body: AIVideoRequest) -> StreamingResponse:
         raise HTTPException(status_code=502, detail="Empty response from Modal")
 
     return StreamingResponse(
-        io.BytesIO(content),
+        io.BytesIO(r.content),
         media_type="video/mp4",
-        headers={"Content-Disposition": "inline; filename=ai-workout.mp4"},
+        headers={"Content-Disposition": f'inline; filename="{gen_id}.mp4"'},
     )
 
 

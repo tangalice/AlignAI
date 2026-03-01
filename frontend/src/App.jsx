@@ -62,6 +62,7 @@ function App() {
   const [workoutSummary, setWorkoutSummary] = useState(null);
   const [workoutSummaryLoading, setWorkoutSummaryLoading] = useState(false);
   const [workoutSummaryError, setWorkoutSummaryError] = useState(null);
+  const [isPastedYoutubeShort, setIsPastedYoutubeShort] = useState(false);
 
   // Tabs: "youtube" | "ai"
   const [activeTab, setActiveTab] = useState("youtube");
@@ -74,15 +75,22 @@ function App() {
   const [aiDuration, setAiDuration] = useState(0);
   const [aiVolume, setAiVolume] = useState(100);
   const [aiSpeed, setAiSpeed] = useState(1);
+  const [aiStage, setAiStage] = useState("");
+  const [aiProgressText, setAiProgressText] = useState("");
+  const [aiPercent, setAiPercent] = useState(0);  
+  const [aiGenId, setAiGenId] = useState(null);
 
   const ytVideoRef = useRef(null);
   const aiVideoRef = useRef(null);
   const ytProgressIntervalRef = useRef(null);
   const ytSkeletonCanvasRef = useRef(null);
 
-  const ytVideoSrc = referenceVideoUrl || null;
-
   const apiBase = import.meta.env.VITE_API_BASE || "";
+  const ytVideoSrc = referenceVideoUrl || null;
+  const isYoutubeVideo = Boolean(
+    referenceVideoUrl && String(referenceVideoUrl).includes("/api/youtube/")
+  );
+  const youtubeVideoIdFromUrl = referenceVideoUrl?.match(/\/api\/youtube\/([^/?#]+)/)?.[1] ?? null;
 
   useEffect(() => {
     fetch(`${apiBase}/api/coaching/llm/config`)
@@ -97,13 +105,39 @@ function App() {
       });
   }, [apiBase]);
 
-  // Search exercises (debounced, AbortController cancels stale requests)
+  // When user pastes a YouTube link in the exercise input, use it as the video source (no iframe; backend streams via redirect).
+  useEffect(() => {
+    if (activeTab !== "youtube") return;
+    const trimmed = exerciseSearchQuery.trim();
+    const videoId = getYouTubeVideoId(trimmed);
+    if (videoId) {
+      setReferenceVideoUrl(`${apiBase}/api/youtube/${videoId}`);
+      setIsPastedYoutubeShort(trimmed.toLowerCase().includes("shorts"));
+      setReferenceExerciseId(null);
+      setReferenceExerciseMuscle("");
+      setReferenceExerciseName("");
+      setPreprocessError(null);
+      setPreprocessResult(null);
+      setExerciseSearchFocused(false);
+      setExerciseResults([]);
+    } else if (referenceVideoUrl && String(referenceVideoUrl).includes("/api/youtube/")) {
+      setReferenceVideoUrl("");
+      setIsPastedYoutubeShort(false);
+      setReferenceExerciseId(null);
+      setReferenceExerciseMuscle("");
+      setReferenceExerciseName("");
+      setPreprocessResult(null);
+    }
+  }, [exerciseSearchQuery, activeTab, apiBase, referenceVideoUrl]);
+
+  // Search exercises (debounced, AbortController cancels stale requests); skip when input is a YouTube link
   const exerciseSearchTimeoutRef = useRef(null);
   const exerciseSearchAbortRef = useRef(null);
   useEffect(() => {
     if (exerciseSearchTimeoutRef.current) clearTimeout(exerciseSearchTimeoutRef.current);
     if (activeTab !== "youtube") return;
     const q = exerciseSearchQuery.trim();
+    if (getYouTubeVideoId(q)) return;
     const doSearch = async () => {
       if (exerciseSearchAbortRef.current) exerciseSearchAbortRef.current.abort();
       exerciseSearchAbortRef.current = new AbortController();
@@ -152,6 +186,7 @@ function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Could not find video");
       setReferenceVideoUrl(data.video_url);
+      setIsPastedYoutubeShort(false);
       setReferenceExerciseId(exercise.id);
       setReferenceExerciseMuscle((exercise.muscle || "").toLowerCase());
       setReferenceExerciseName(exercise.name || "");
@@ -177,28 +212,94 @@ function App() {
   const handleGenerateAiVideo = async () => {
     const prompt = (aiDescription || "").trim();
     if (!prompt) {
-      setAiError("Please enter a description for the workout/exercise video.");
+      setAiError("Please enter a description.");
       return;
     }
+  
     setAiError(null);
     setAiLoading(true);
+    setAiProgressText("Starting…");
+    setAiPercent(0);
+  
     if (aiVideoUrl) {
       URL.revokeObjectURL(aiVideoUrl);
       setAiVideoUrl(null);
     }
+  
     try {
-      const res = await fetch(`${apiBase}/api/ai-video/generate`, {
+      const res = await fetch(`${apiBase}/api/ai-video/generate-sse`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt }),
       });
-      if (!res.ok) {
+  
+      if (!res.ok || !res.body) {
         const text = await res.text();
-        throw new Error(text || `Generation failed (${res.status})`);
+        throw new Error(text || `Request failed (${res.status})`);
       }
-      const blob = await res.blob();
+  
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+      let genId = null;
+  
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+  
+        buffer += decoder.decode(value, { stream: true });
+  
+        // parse SSE frames split by blank line
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+  
+        for (const part of parts) {
+          const line = part.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+  
+          const jsonStr = line.slice(6);
+          let evt;
+          try {
+            evt = JSON.parse(jsonStr);
+          } catch {
+            continue;
+          }
+  
+          if (evt.type === "genId") {
+            genId = evt.id;
+          }
+  
+          if (evt.type === "progress") {
+            setAiPercent(evt.percent ?? 0);
+            setAiProgressText(evt.phase ? `${evt.phase}…` : "Working…");
+          }
+  
+          if (evt.type === "synthesis") {
+            setAiProgressText("Generating video…");
+          }
+  
+          if (evt.type === "error") {
+            throw new Error(evt.message || "Generation failed");
+          }
+  
+          if (evt.type === "done") {
+            genId = evt.id || genId;
+          }
+        }
+      }
+  
+      if (!genId) throw new Error("No generation id returned.");
+  
+      // Download mp4 from YOUR server (FastAPI), not directly from Modal
+      const videoRes = await fetch(`${apiBase}/api/ai-video/download/${genId}`);
+      if (!videoRes.ok) throw new Error(await videoRes.text());
+  
+      const blob = await videoRes.blob();
       const url = URL.createObjectURL(blob);
       setAiVideoUrl(url);
+      setAiProgressText("Done!");
+      setAiPercent(100);
+  
     } catch (err) {
       setAiError(err.message || "Failed to generate video.");
     } finally {
@@ -968,14 +1069,14 @@ function App() {
       {activeTab === "youtube" && (
         <div className="input-row exercise-search-row">
           <label className="input-label" htmlFor="exercise-search">
-            Search workout (YMove Exercise API)
+            Search exercises or paste a YouTube link
           </label>
           <div className="exercise-search-wrap">
             <input
               id="exercise-search"
               type="text"
               className="youtube-input"
-              placeholder="e.g. Bicycle Crunches, Push-Ups, Squats..."
+              placeholder="e.g. Bicycle Crunches, Push-Ups, Squats — or https://youtube.com/watch?v=..."
               value={exerciseSearchQuery}
               onChange={(e) => setExerciseSearchQuery(e.target.value)}
               onFocus={() => setExerciseSearchFocused(true)}
@@ -1047,8 +1148,19 @@ function App() {
             onClick={handleGenerateAiVideo}
             disabled={aiLoading}
           >
-            {aiLoading ? "Generating…" : "Generate Video"}
+            {aiLoading ? `Generating… ${aiPercent}%` : "Generate Video"}
           </button>
+          {aiLoading && (
+            <div className="ai-progress">
+              <div className="ai-progress-top">
+                <span className="ai-progress-stage">{aiStage || "working"}</span>
+                <span className="ai-progress-percent">{aiPercent}%</span>
+              </div>
+              <div className="ai-progress-bar">
+                <div className="ai-progress-fill" style={{ width: `${aiPercent}%` }} />
+              </div>
+            </div>
+          )}
           {aiError && <div className="ai-error">{aiError}</div>}
         </div>
       )}
@@ -1059,7 +1171,9 @@ function App() {
           <div className="youtube-video-wrap">
             {activeTab === "youtube" && ytVideoSrc ? (
               <>
-                <div className="youtube-video-area">
+                <div
+                  className={`youtube-video-area ${isYoutubeVideo && !isPastedYoutubeShort ? "video-area-youtube" : "video-area-preset"}`}
+                >
                   <video
                     key={referenceExerciseId || referenceVideoUrl}
                     ref={ytVideoRef}
@@ -1069,6 +1183,7 @@ function App() {
                     loop
                     preload="auto"
                     crossOrigin="anonymous"
+                    poster={youtubeVideoIdFromUrl ? `https://img.youtube.com/vi/${youtubeVideoIdFromUrl}/hqdefault.jpg` : undefined}
                     onPlay={() => setYtPlaying(true)}
                     onPause={() => setYtPlaying(false)}
                     onTimeUpdate={handleYtTimeUpdate}
@@ -1076,9 +1191,9 @@ function App() {
                     onEnded={() => setYtProgress(0)}
                     onLoadStart={() => { setYtLoading(true); setYtError(null); }}
                     onCanPlay={() => setYtLoading(false)}
-                    onError={(e) => {
+                    onError={() => {
                       setYtLoading(false);
-                      setYtError("Video failed to load. Is the backend running on port 8001?");
+                      setYtError("Video failed to load. Is the backend running?");
                     }}
                   />
                   <canvas
@@ -1244,9 +1359,9 @@ function App() {
                 </div>
               </div>
             ) : (
-              <div className="youtube-video-area">
+              <div className="youtube-video-area video-area-preset">
                 <div className="youtube-placeholder-top">
-                  Search for an exercise above to load the demo video
+                  Search for an exercise or paste a YouTube link to load the demo video
                 </div>
               </div>
             )}
